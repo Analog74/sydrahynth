@@ -1,0 +1,61 @@
+diff --git a/src/dynarmic/frontend/A32/translate/translate_arm.cpp b/src/dynarmic/frontend/A32/translate/translate_arm.cpp
+index 24b5797..a92a4f2 100644
+--- a/src/dynarmic/frontend/A32/translate/translate_arm.cpp
++++ b/src/dynarmic/frontend/A32/translate/translate_arm.cpp
+@@ -41,7 +41,9 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
+             tcb->PreCodeTranslationHook(false, arm_pc, visitor.ir);
+             ticks_for_instruction = tcb->GetTicksForCode(false, arm_pc, *arm_instruction);
+ 
+-            if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(*arm_instruction)) {
++            if (tcb->IsSystemInstruction(false, *arm_instruction)) {
++                should_continue = visitor.RaiseException(Exception::SystemInstruction);
++            } else if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(*arm_instruction)) {
+                 should_continue = vfp_decoder->get().call(visitor, *arm_instruction);
+             } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(*arm_instruction)) {
+                 should_continue = asimd_decoder->get().call(visitor, *arm_instruction);
+diff --git a/src/dynarmic/frontend/A32/translate/translate_callbacks.h b/src/dynarmic/frontend/A32/translate/translate_callbacks.h
+index e0ad48e..b5c11b1 100644
+--- a/src/dynarmic/frontend/A32/translate/translate_callbacks.h
++++ b/src/dynarmic/frontend/A32/translate/translate_callbacks.h
+@@ -30,6 +30,12 @@ struct TranslateCallbacks {
+ 
+     // How many ticks should this instruction take to execute?
+     virtual std::uint64_t GetTicksForCode(bool is_thumb, VAddr vaddr, std::uint32_t instruction) = 0;
++
++    // If this returns true, the instruction is not translated; Exception::SystemInstruction is
++    // raised instead and the callee emulates it in ExceptionRaised. ARM: the callee evaluates
++    // the condition. Thumb: called only when the IT condition passed; 32-bit instructions are
++    // passed as (first halfword << 16) | second halfword.
++    virtual bool IsSystemInstruction(bool /*is_thumb*/, std::uint32_t /*instruction*/) { return false; }
+ };
+ 
+ }  // namespace Dynarmic::A32
+diff --git a/src/dynarmic/frontend/A32/translate/translate_thumb.cpp b/src/dynarmic/frontend/A32/translate/translate_thumb.cpp
+index d61d8cc..a4a418f 100644
+--- a/src/dynarmic/frontend/A32/translate/translate_thumb.cpp
++++ b/src/dynarmic/frontend/A32/translate/translate_thumb.cpp
+@@ -125,7 +125,9 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
+             ticks_for_instruction = tcb->GetTicksForCode(true, arm_pc, thumb_instruction);
+ 
+             if (IsUnconditionalInstruction(is_thumb_16, thumb_instruction) || visitor.ThumbConditionPassed()) {
+-                if (is_thumb_16) {
++                if (tcb->IsSystemInstruction(true, thumb_instruction)) {
++                    should_continue = visitor.RaiseException(Exception::SystemInstruction);
++                } else if (is_thumb_16) {
+                     if (const auto decoder = DecodeThumb16<TranslatorVisitor>(static_cast<u16>(thumb_instruction))) {
+                         should_continue = decoder->get().call(visitor, static_cast<u16>(thumb_instruction));
+                     } else {
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+index 360df06..9e8b3ce 100644
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -55,6 +55,9 @@ enum class Exception {
+     /// Attempted to execute a code block at an address for which MemoryReadCode returned std::nullopt.
+     /// (Intended to be used to emulate memory protection faults.)
+     NoExecuteFault,
++    /// UserCallbacks::IsSystemInstruction claimed this instruction. PC has already been advanced
++    /// past it; the callee must emulate it, including evaluating its condition code.
++    SystemInstruction,
+ };
+ 
+ /// These function pointers may be inserted into compiled code.

@@ -1,0 +1,700 @@
+#include "PanelView.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <tuple>
+
+#include "HydraProcessor.h"
+
+namespace {
+using Input = hydra::Emulator::PanelInput;
+constexpr int kShiftButton = 62;
+// A button pressed together with SHIFT goes down this much after SHIFT, and
+// SHIFT is let go this much after the button: the firmware scans the buttons
+// every 5 ms and must see SHIFT held when the other button arrives.
+constexpr int kShiftLeadMs = 20, kShiftTrailMs = 80;
+
+// Buttons: label, keyscan id, LED index (-1: none), centre and size on the canvas.
+struct Button {
+    const char* label;
+    int id, led;
+    float x, y, w = 70, h = 36;
+};
+const Button kButtons[] = {
+    // Arpeggiator
+    {"ON", 26, 30, 385, 412}, {"LATCH", 28, 31, 532, 412}, {"TRIPLET", 46, 32, 680, 412}, {"TAP TEMPO", 48, 29, 827, 412},
+    // Knob assignment for cutoff and resonance
+    {"FILTER 1", 79, 26, 802, 562}, {"FILTER 2", 80, 27, 802, 630},
+    // Patch and system
+    {"BROWSE", 45, 34, 955, 124, 76}, {"SAVE", 50, 33, 955, 238, 76}, {"SYSTEM", 27, 38, 955, 314, 76},
+    {"INIT", 44, 35, 955, 418, 76}, {"RANDOM", 59, 36, 955, 488, 76}, {"SHIFT", 62, 39, 955, 598, 76},
+    // Navigation
+    {"<", 51, -1, 1065, 488, 62}, {">", 55, -1, 1175, 488, 62}, {"HOME", 49, -1, 1120, 598, 170, 40},
+    {"EXIT", 7, 45, 1870, 124, 76}, {"VOICE", 56, 46, 1870, 234, 76}, {"UP", 60, 47, 1870, 316, 76},
+    {"DOWN", 61, 48, 1870, 378, 76}, {"MACRO ASSIGN", 57, 49, 1870, 486, 76}, {"MOD MATRIX", 58, 58, 1870, 596, 76},
+    // Encoder push buttons
+    {"", 33, 50, 1315, 235, 62, 30}, {"", 34, 51, 1455, 235, 62, 30}, {"", 35, 52, 1597, 235, 62, 30},
+    {"", 36, 53, 1737, 235, 62, 30}, {"", 37, 54, 1315, 488, 62, 30}, {"", 38, 55, 1455, 488, 62, 30},
+    {"", 39, 56, 1597, 488, 62, 30}, {"", 40, 57, 1737, 488, 62, 30},
+    // Module buttons
+    {"OSC 1", 11, 0, 125, 770}, {"MUTANT 1", 14, 3, 230, 770, 78}, {"MUTANT 2", 15, 4, 332, 770, 78},
+    {"OSC 2", 12, 1, 125, 838}, {"MUTANT 3", 16, 5, 230, 838, 78}, {"MUTANT 4", 3, 6, 332, 838, 78},
+    {"OSC 3", 13, 2, 125, 908}, {"RING-NOISE", 17, 7, 332, 908, 78},
+    {"MIXER", 0, 8, 437, 838}, {"FILTER 1", 24, 19, 540, 805}, {"FILTER 2", 25, 20, 540, 872},
+    {"AMP", 1, 21, 644, 838}, {"PRE-FX", 2, 22, 746, 838}, {"DELAY", 4, 23, 851, 805},
+    {"REVERB", 5, 24, 851, 872}, {"POST-FX", 6, 25, 953, 838},
+    {"ENV 1", 70, 9, 540, 728}, {"ENV 2", 71, 10, 644, 728}, {"ENV 3", 72, 11, 748, 728},
+    {"ENV 4", 73, 12, 850, 728}, {"ENV 5", 18, 13, 955, 728},
+    {"LFO 1", 66, 14, 540, 948}, {"LFO 2", 67, 15, 644, 948}, {"LFO 3", 68, 16, 748, 948},
+    {"LFO 4", 69, 17, 850, 948}, {"LFO 5", 47, 18, 955, 948},
+};
+
+// Secondary functions printed in orange under some buttons (used with SHIFT).
+struct Legend {
+    int id;
+    const char* text;
+};
+const Legend kShiftLegends[] = {{26, "EDIT"}, {28, "SUSTAIN"}, {45, "FAVORITE"}, {49, "PANIC"}, {51, "-10"}, {55, "+10"}};
+
+// The pads' SHIFT functions, printed under them: scales on the lower two rows,
+// octave, pad mode and key on the top row (pad number = row * 8 + column + 1).
+const char* const kPadLegends[3][8] = {
+    {"Chromatic", "Major", "Maj Pent", "Min Pent", "Blues", "Bebop", "Whole Tone", "Dim Whole"},
+    {"Dorian", "Phrygian", "Lydian", "Mixolydian", "Minor", "Locrian", "Harmonic Min", "Melodic Min"},
+    {"OCT -", "OCT +", "PAD MODE -", "PAD MODE +", "KEY", "", "", ""},
+};
+
+// Section headings, as on the hardware.
+struct Heading {
+    const char* text;
+    float x, y, w;  // centre x, top, width
+};
+const Heading kHeadings[] = {
+    {"ARPEGGIATOR", 606, 200, 560}, {"FILTER CONTROLS", 611, 490, 470}, {"MODULE SELECT", 230, 678, 300},
+    {"MAIN SYSTEMS", 1065, 30, 300}, {"MASTER CONTROL", 1590, 30, 600},
+};
+
+// Knobs: master volume (the plugin's output gain), the arpeggiator switches and
+// the analog knobs.
+struct Knob {
+    enum class Kind { Volume, Arp, Analog } kind;
+    const char* label;
+    int index;  // switch or knob
+    float x, y, radius;
+};
+const Knob kKnobs[] = {
+    {Knob::Kind::Volume, "MASTER VOLUME", 0, 175, 405, 38},
+    {Knob::Kind::Arp, "MODE", hydra::FrontPanel::kArpMode, 385, 300, 27},
+    {Knob::Kind::Arp, "OCTAVE", hydra::FrontPanel::kArpOctave, 532, 300, 27},
+    {Knob::Kind::Arp, "DIVISION", hydra::FrontPanel::kArpDivision, 680, 300, 27},
+    {Knob::Kind::Arp, "SWING", hydra::FrontPanel::kArpSwing, 827, 300, 27},
+    {Knob::Kind::Analog, "CUTOFF", hydra::FrontPanel::kCutoff, 422, 600, 34},
+    {Knob::Kind::Analog, "RESONANCE", hydra::FrontPanel::kResonance, 547, 600, 34},
+    {Knob::Kind::Analog, "DRIVE / MORPH", hydra::FrontPanel::kDriveMorph, 673, 600, 34},
+};
+
+constexpr float kEncoderX[4] = {1315, 1455, 1597, 1737}, kEncoderY[2] = {122, 597}, kEncoderRadius = 23;
+constexpr float kDataX = 1120, kDataY = 155, kDataRadius = 76;
+
+// Displays: main, then the four above the encoders (top-left corner and size).
+const juce::Rectangle<float> kDisplays[] = {
+    {1030, 318, 180, 90}, {1247, 325, 135, 68}, {1388, 325, 135, 68}, {1529, 325, 135, 68}, {1670, 325, 135, 68}};
+
+constexpr float kPadW = 82, kPadH = 62, kPadX = 1056, kPadPitch = 108.2f;
+constexpr float kPadY[3] = {921, 828, 733};  // row centres, bottom row first
+juce::Rectangle<float> padBounds(int row, int column) {
+    return {kPadX + kPadPitch * static_cast<float>(column), kPadY[row] - kPadH / 2, kPadW, kPadH};
+}
+
+juce::Rectangle<float> buttonBounds(const Button& b) { return {b.x - b.w / 2, b.y - b.h / 2, b.w, b.h}; }
+juce::Point<float> encoderCentre(int e) { return {kEncoderX[e & 3], kEncoderY[e >> 2]}; }
+
+const juce::Colour kBackground(0xff1b1d21), kPanel(0xff26292e), kLabel(0xffb8bcc4), kLed(0xffffd27a), kOrange(0xffe0702a);
+
+// The WS2812 LEDs run dim: show the hue at full brightness, faded by the level.
+juce::Colour ledColour(std::uint32_t rgb, juce::Colour off) {
+    const int r8 = static_cast<int>(rgb >> 16 & 0xFF), g8 = static_cast<int>(rgb >> 8 & 0xFF), b8 = static_cast<int>(rgb & 0xFF);
+    const int peak = std::max({r8, g8, b8});
+    if (peak == 0)
+        return off;
+    const float scale = 255.0f / static_cast<float>(peak);
+    const juce::Colour light(static_cast<std::uint8_t>(static_cast<float>(r8) * scale), static_cast<std::uint8_t>(static_cast<float>(g8) * scale),
+                             static_cast<std::uint8_t>(static_cast<float>(b8) * scale));
+    return off.interpolatedWith(light, 0.35f + 0.6f * std::sqrt(static_cast<float>(peak) / 255.0f));
+}
+}  // namespace
+
+PanelView::PanelView(HydraProcessor& processor)
+    : processor_(processor), lights_(std::make_unique<hydra::FrontPanel::Lights>()) {
+    for (auto& image : displays_)
+        image = juce::Image(juce::Image::RGB, hydra::Oled::kWidth, hydra::Oled::kHeight, true);
+    setOpaque(true);
+    startTimerHz(60);
+}
+
+PanelView::~PanelView() = default;
+
+void PanelView::followShiftKey() {
+    const bool down = isMouseOver(true) && juce::ModifierKeys::getCurrentModifiersRealtime().isShiftDown();
+    if (down == shiftKeyHeld_)
+        return;
+    shiftKeyHeld_ = down;
+    if (!shiftLatched_ && !shiftForGesture_) {
+        if (down)
+            pressShift();
+        else
+            releaseShift(kShiftTrailMs);
+    }
+    repaint();
+}
+
+void PanelView::timerCallback() {
+    followShiftKey();
+    if (!processor_.readPanel(*lights_, generation_))
+        return;
+    const bool first = !live_;
+    live_ = true;
+    if (!shown_)
+        shown_ = std::make_unique<hydra::FrontPanel::Lights>();
+    // Only what changed is repainted: the displays that differ, the buttons
+    // whose LED level moved by more than a 32nd (the levels are PWM samples and
+    // jitter), the encoder rings and pads that differ.
+    juce::Rectangle<int> dirty;
+    const auto mark = [&](juce::Rectangle<float> canvas) {
+        const float sx = static_cast<float>(getWidth()) / kCanvasWidth, sy = static_cast<float>(getHeight()) / kCanvasHeight;
+        const juce::Rectangle<int> r(static_cast<int>(std::floor(canvas.getX() * sx)) - 1, static_cast<int>(std::floor(canvas.getY() * sy)) - 1,
+                                     static_cast<int>(std::ceil(canvas.getWidth() * sx)) + 3, static_cast<int>(std::ceil(canvas.getHeight() * sy)) + 3);
+        dirty = dirty.isEmpty() ? r : dirty.getUnion(r);
+    };
+    for (int d = 0; d < hydra::PanelDisplays::kCount; ++d) {
+        const auto i = static_cast<std::size_t>(d);
+        const auto& pixels = lights_->displays[i];
+        if (!first && pixels == shown_->displays[i])
+            continue;
+        shown_->displays[i] = pixels;
+        juce::Image::BitmapData bitmap(displays_[i], juce::Image::BitmapData::writeOnly);
+        for (int y = 0; y < hydra::Oled::kHeight; ++y)
+            for (int x = 0; x < hydra::Oled::kWidth; ++x) {
+                const std::uint8_t v = pixels[static_cast<std::size_t>(y * hydra::Oled::kWidth + x)];
+                bitmap.setPixelColour(x, y, juce::Colour(v, v, v));
+            }
+        mark(kDisplays[d].expanded(4));
+    }
+    for (const Button& b : kButtons) {
+        if (b.led < 0)
+            continue;
+        const auto i = static_cast<std::size_t>(b.led);
+        if (!first && std::lround(lights_->buttons[i] * 32) == std::lround(shown_->buttons[i] * 32))
+            continue;
+        shown_->buttons[i] = lights_->buttons[i];
+        mark(buttonBounds(b));
+    }
+    for (int e = 0; e < hydra::FrontPanel::kEncoders; ++e) {
+        const auto i = static_cast<std::size_t>(e);
+        if (!first && lights_->rings[i] == shown_->rings[i])
+            continue;
+        shown_->rings[i] = lights_->rings[i];
+        const float reach = kEncoderRadius + 14;
+        mark(juce::Rectangle<float>(2 * reach, 2 * reach).withCentre(encoderCentre(e)));
+    }
+    for (int row = 0; row < hydra::FrontPanel::kPadRows; ++row)
+        for (int column = 0; column < hydra::FrontPanel::kPadColumns; ++column) {
+            const auto i = static_cast<std::size_t>(row * hydra::FrontPanel::kPadColumns + column);
+            if (!first && lights_->pads[i] == shown_->pads[i])
+                continue;
+            shown_->pads[i] = lights_->pads[i];
+            mark(padBounds(row, column));
+        }
+    if (first || lights_->patchRing != shown_->patchRing) {
+        shown_->patchRing = lights_->patchRing;
+        const float reach = kDataRadius + 22;
+        mark(juce::Rectangle<float>(2 * reach, 2 * reach).withCentre({kDataX, kDataY}));
+    }
+    if (first)
+        repaint();
+    else if (!dirty.isEmpty())
+        repaint(dirty);
+}
+
+juce::Point<float> PanelView::toCanvas(juce::Point<float> p) const {
+    return {p.x * kCanvasWidth / static_cast<float>(getWidth()), p.y * kCanvasHeight / static_cast<float>(getHeight())};
+}
+
+void PanelView::paint(juce::Graphics& g) {
+    g.fillAll(kBackground);
+    g.addTransform(juce::AffineTransform::scale(static_cast<float>(getWidth()) / kCanvasWidth,
+                                                static_cast<float>(getHeight()) / kCanvasHeight));
+    g.setColour(kPanel);
+    g.fillRoundedRectangle(20, 20, kCanvasWidth - 40, kCanvasHeight - 40, 16);
+    g.setColour(kLabel);
+    g.setFont(juce::FontOptions(40.0f, juce::Font::bold));
+    g.drawText("SYDRAHYNTH", juce::Rectangle<float>(70, 70, 420, 60), juce::Justification::centredLeft);
+    paintHeadings(g);
+    paintModuleLines(g);
+    paintDisplays(g);
+    paintButtons(g);
+    paintKnobs(g);
+    paintEncoders(g);
+    paintPads(g);
+    if (!live_) {
+        g.setColour(kLabel);
+        g.setFont(juce::FontOptions(28.0f));
+        g.drawText("waiting for the emulator...", kDisplays[0].expanded(200, 0).translated(0, 100),
+                   juce::Justification::centred);
+    }
+}
+
+void PanelView::paintDisplays(juce::Graphics& g) {
+    g.setImageResamplingQuality(juce::Graphics::lowResamplingQuality);
+    for (int d = 0; d < hydra::PanelDisplays::kCount; ++d) {
+        const juce::Rectangle<float> r = kDisplays[d];
+        g.setColour(juce::Colours::black);
+        g.fillRect(r.expanded(4));
+        g.setOpacity(1.0f);
+        g.drawImage(displays_[static_cast<std::size_t>(d)], r, juce::RectanglePlacement::stretchToFit);
+    }
+}
+
+void PanelView::paintButtons(juce::Graphics& g) {
+    for (const Button& b : kButtons) {
+        const juce::Rectangle<float> r = buttonBounds(b);
+        const bool held = (active_.kind == Target::Kind::Button && &kButtons[active_.index] == &b) ||
+                          (b.id == kShiftButton && (shiftLatched_ || shiftForGesture_ || shiftKeyHeld_));
+        g.setColour(held ? juce::Colour(0xff4a4f58) : juce::Colour(0xff3a3e45));
+        g.fillRoundedRectangle(r, 5);
+        if (b.led >= 0) {
+            const float level = lights_->buttons[static_cast<std::size_t>(b.led)];
+            if (level > 0.01f) {
+                g.setColour(kLed.withAlpha(0.25f + 0.75f * level));
+                g.fillRoundedRectangle(r.reduced(3).removeFromBottom(5), 2);
+            }
+        }
+        g.setColour(kLabel);
+        g.setFont(juce::FontOptions(b.w < 72 && std::strlen(b.label) > 7 ? 10.0f : 12.0f));
+        g.drawFittedText(b.label, r.reduced(3, 2).toNearestInt().withTrimmedBottom(5), juce::Justification::centred, 2);
+        for (const Legend& legend : kShiftLegends)
+            if (legend.id == b.id) {
+                g.setColour(kOrange);
+                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+                g.drawText(legend.text, juce::Rectangle<float>(r.getX() - 20, r.getBottom() + 3, r.getWidth() + 40, 14),
+                           juce::Justification::centred);
+            }
+        // The Control buttons' numbers: under the upper row, above the lower one.
+        if (b.id >= 33 && b.id <= 40) {
+            const int number = b.id - 32;
+            const float y = number <= 4 ? r.getBottom() + 3 : r.getY() - 17;
+            g.setColour(kLabel);
+            g.setFont(juce::FontOptions(12.0f));
+            g.drawText(juce::String(number), juce::Rectangle<float>(r.getX(), y, r.getWidth(), 14), juce::Justification::centred);
+        }
+        if (b.id == 61) {  // DOWN: the pair is labelled PAGE
+            g.setColour(kLabel);
+            g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+            g.drawText("PAGE", juce::Rectangle<float>(r.getX() - 10, r.getBottom() + 4, r.getWidth() + 20, 14), juce::Justification::centred);
+        }
+    }
+}
+
+// The signal-flow lines of the Module Select section, drawn behind its buttons.
+void PanelView::paintModuleLines(juce::Graphics& g) {
+    const auto box = [](int id) {
+        for (const Button& b : kButtons)
+            if (b.id == id && (b.y > 700))  // the module buttons (FILTER 1/2 also exist in the filter section)
+                return buttonBounds(b);
+        return juce::Rectangle<float>();
+    };
+    enum : int { kOsc1 = 11, kOsc2 = 12, kOsc3 = 13, kMut1 = 14, kMut2 = 15, kMut3 = 16, kMut4 = 3, kRing = 17, kMixer = 0,
+                 kFilter1 = 24, kFilter2 = 25, kAmp = 1, kPreFx = 2, kDelay = 4, kReverb = 5, kPostFx = 6,
+                 kEnv1 = 70, kEnv2 = 71, kEnv5 = 18, kLfo1 = 66, kLfo2 = 67, kLfo5 = 47 };
+    const auto line = [&g](float x1, float y1, float x2, float y2) { g.drawLine(x1, y1, x2, y2, 2.0f); };
+    const auto dashed = [&g](float x1, float y1, float x2, float y2, float width, float dash, float gap) {
+        const float pattern[] = {dash, gap};
+        g.drawDashedLine(juce::Line<float>(x1, y1, x2, y2), pattern, 2, width);
+    };
+
+    // Orange lines behind the envelope and LFO rows.
+    g.setColour(kOrange);
+    for (const int id : {kEnv1, kLfo1}) {
+        const float y = box(id).getCentreY();
+        g.drawLine(box(id).getX() - 45, y, box(id == kEnv1 ? kEnv5 : kLfo5).getRight() + 35, y, 4.0f);
+    }
+
+    g.setColour(juce::Colour(0xff9a9fa8));
+    // Oscillators to mutants, and on to the mixer bus.
+    for (const auto& [a, b] : {std::pair{kOsc1, kMut1}, {kMut1, kMut2}, {kOsc2, kMut3}, {kMut3, kMut4}, {kOsc3, kRing}})
+        line(box(a).getRight(), box(a).getCentreY(), box(b).getX(), box(a).getCentreY());
+    const float mixBus = (box(kMut2).getRight() + box(kMixer).getX()) / 2;
+    for (const int id : {kMut2, kMut4, kRing})
+        line(box(id).getRight(), box(id).getCentreY(), mixBus, box(id).getCentreY());
+    line(mixBus, box(kMut2).getCentreY(), mixBus, box(kRing).getCentreY());
+    line(mixBus, box(kMixer).getCentreY(), box(kMixer).getX(), box(kMixer).getCentreY());
+
+    // Mixer to the filters (series or parallel) and on to the amp.
+    const float inBus = (box(kMixer).getRight() + box(kFilter1).getX()) / 2;
+    const float outBus = (box(kFilter1).getRight() + box(kAmp).getX()) / 2;
+    line(box(kMixer).getRight(), box(kMixer).getCentreY(), inBus, box(kMixer).getCentreY());
+    line(outBus, box(kAmp).getCentreY(), box(kAmp).getX(), box(kAmp).getCentreY());
+    for (const float bus : {inBus, outBus}) {
+        line(bus, box(kFilter1).getCentreY(), bus, box(kFilter2).getCentreY());
+        for (const int id : {kFilter1, kFilter2})
+            line(bus, box(id).getCentreY(), bus == inBus ? box(id).getX() : box(id).getRight(), box(id).getCentreY());
+    }
+    line(box(kFilter1).getCentreX(), box(kFilter1).getBottom(), box(kFilter1).getCentreX(), box(kFilter2).getY());
+
+    // The pre-wired modulators: ENV 1 / LFO 1 to the filters, ENV 2 / LFO 2 to the amp.
+    for (const auto& [top, middleTop, middleBottom, bottom] :
+         {std::tuple{kEnv1, kFilter1, kFilter2, kLfo1}, std::tuple{kEnv2, kAmp, kAmp, kLfo2}}) {
+        const float x = box(middleTop).getCentreX();
+        dashed(x, box(top).getBottom(), x, box(middleTop).getY(), 2.0f, 6.0f, 5.0f);
+        dashed(x, box(middleBottom).getBottom(), x, box(bottom).getY(), 2.0f, 6.0f, 5.0f);
+    }
+
+    // Amp, pre-FX, delay and reverb (in series or parallel), post-FX.
+    line(box(kAmp).getRight(), box(kAmp).getCentreY(), box(kPreFx).getX(), box(kPreFx).getCentreY());
+    const float fxIn = (box(kPreFx).getRight() + box(kDelay).getX()) / 2;
+    const float fxOut = (box(kDelay).getRight() + box(kPostFx).getX()) / 2;
+    line(box(kPreFx).getRight(), box(kPreFx).getCentreY(), fxIn, box(kPreFx).getCentreY());
+    line(fxOut, box(kPostFx).getCentreY(), box(kPostFx).getX(), box(kPostFx).getCentreY());
+    for (const float bus : {fxIn, fxOut}) {
+        line(bus, box(kDelay).getCentreY(), bus, box(kReverb).getCentreY());
+        for (const int id : {kDelay, kReverb})
+            line(bus, box(id).getCentreY(), bus == fxIn ? box(id).getX() : box(id).getRight(), box(id).getCentreY());
+    }
+    line(box(kDelay).getCentreX(), box(kDelay).getBottom(), box(kDelay).getCentreX(), box(kReverb).getY());
+}
+
+void PanelView::paintHeadings(juce::Graphics& g) {
+    g.setFont(juce::FontOptions(20.0f, juce::Font::bold));
+    for (const Heading& h : kHeadings) {
+        const juce::Rectangle<float> r(h.x - h.w / 2, h.y, h.w, 26);
+        g.setColour(juce::Colour(0xff1e2024));
+        g.fillRoundedRectangle(r, 4);
+        g.setColour(kOrange);
+        g.drawText(h.text, r, juce::Justification::centred);
+    }
+}
+
+namespace {
+// The detent of an arp switch position in the shared raster of eight (0 = bottom
+// left, clockwise), checked against the firmware's arp edit page.
+int arpSlot(int sw, int position) { return sw == hydra::FrontPanel::kArpOctave ? position + 4 : position; }
+
+// The printed position names, in the raster's order (empty: no detent).
+const char* const kArpLegends[hydra::FrontPanel::kArpSwitches][8] = {
+    {"UP", "DOWN", "UP / DN", "UP & DN", "ORDER", "RANDOM", "CHORD", "PHRASE"},
+    {"", "", "", "", "1", "2", "3", "4"},
+    {"1/4", "1/8", "1/16", "1/32", "", "", "", ""},
+    {"OFF", "52%", "54%", "58%", "62%", "66%", "70%", "75%"},
+};
+
+// The position names around an arp switch, each joined to its detent by a
+// leader line: the left four bottom to top, the right four top to bottom.
+void paintArpLegends(juce::Graphics& g, const Knob& k) {
+    const juce::Point<float> c(k.x, k.y);
+    constexpr float kRow = 12.5f;
+    g.setFont(juce::FontOptions(9.5f, juce::Font::bold));
+    for (int slot = 0; slot < 8; ++slot) {
+        const char* legend = kArpLegends[k.index][slot];
+        if (!*legend)
+            continue;
+        const bool left = slot < 4;
+        const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(slot) / 7.0f);
+        const float y = left ? k.y + (1.5f - static_cast<float>(slot)) * kRow : k.y + (static_cast<float>(slot) - 5.5f) * kRow;
+        const float side = left ? -1.0f : 1.0f;
+        const juce::Point<float> from = c.getPointOnCircumference(k.radius + 3, angle);
+        const juce::Point<float> elbow(k.x + side * (k.radius + 12), y), end(k.x + side * (k.radius + 18), y);
+        g.setColour(juce::Colour(0xff7d828b));
+        g.drawLine(juce::Line<float>(from, elbow), 1.2f);
+        g.drawLine(juce::Line<float>(elbow, end), 1.2f);
+        g.setColour(kLabel);
+        const juce::Rectangle<float> box = left ? juce::Rectangle<float>(end.x - 2 - 60, y - 7, 60, 14) : juce::Rectangle<float>(end.x + 2, y - 7, 60, 14);
+        g.drawText(legend, box, left ? juce::Justification::centredRight : juce::Justification::centredLeft);
+    }
+}
+}  // namespace
+
+void PanelView::paintKnobs(juce::Graphics& g) {
+    for (const Knob& k : kKnobs) {
+        float value = 0;
+        juce::String text;
+        switch (k.kind) {
+        case Knob::Kind::Volume:
+            value = processor_.outputGain().convertTo0to1(processor_.outputGain().get());
+            text = juce::String(processor_.outputGain().get(), 1) + " dB";
+            break;
+        case Knob::Kind::Arp:
+            // All four arp switches share one raster of eight detents over 270
+            // degrees; OCTAVE uses the right four, DIVISION the left four.
+            value = static_cast<float>(arpSlot(k.index, arpPositions_[static_cast<std::size_t>(k.index)])) / 7.0f;
+            break;
+        case Knob::Kind::Analog: value = knobValues_[static_cast<std::size_t>(k.index)]; break;
+        }
+        const juce::Point<float> c(k.x, k.y);
+        g.setColour(juce::Colour(0xff111215));
+        g.fillEllipse(juce::Rectangle<float>(k.radius * 2, k.radius * 2).withCentre(c));
+        g.setColour(juce::Colour(0xff50555e));
+        g.drawEllipse(juce::Rectangle<float>(k.radius * 2, k.radius * 2).withCentre(c), 2);
+        const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * value);
+        g.setColour(juce::Colours::white);
+        g.drawLine(juce::Line<float>(c, c.getPointOnCircumference(k.radius - 4, angle)), 3);
+        if (k.kind == Knob::Kind::Arp)
+            paintArpLegends(g, k);
+        g.setColour(kLabel);
+        g.setFont(juce::FontOptions(12.0f));
+        if (k.kind == Knob::Kind::Volume) {
+            g.drawText(k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, -k.radius - 14)),
+                       juce::Justification::centred);
+            g.drawText(text, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 14)),
+                       juce::Justification::centred);
+        } else {  // as on the hardware: the name under the knob
+            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+            g.drawText(k.label, juce::Rectangle<float>(140, 16).withCentre(c.translated(0, k.radius + 16)),
+                       juce::Justification::centred);
+        }
+    }
+}
+
+void PanelView::paintEncoders(juce::Graphics& g) {
+    const auto encoder = [&g](juce::Point<float> c, float radius) {
+        g.setColour(juce::Colour(0xff111215));
+        g.fillEllipse(juce::Rectangle<float>(radius * 2, radius * 2).withCentre(c));
+        g.setColour(juce::Colour(0xff5a5f68));
+        g.drawEllipse(juce::Rectangle<float>(radius * 2, radius * 2).withCentre(c), 2);
+    };
+    for (int e = 0; e < hydra::FrontPanel::kEncoders; ++e) {
+        const juce::Point<float> c = encoderCentre(e);
+        encoder(c, kEncoderRadius);
+        // The ring: 15 LEDs over 270 degrees, from bottom left to bottom right.
+        for (int l = 0; l < hydra::FrontPanel::kRingLeds; ++l) {
+            const float angle = juce::MathConstants<float>::pi * (-0.75f + 1.5f * static_cast<float>(l) / 14.0f);
+            const bool lit = lights_->rings[static_cast<std::size_t>(e)][static_cast<std::size_t>(l)];
+            g.setColour(lit ? juce::Colour(0xff6fd3ff) : juce::Colour(0xff32363c));
+            g.fillEllipse(juce::Rectangle<float>(6, 6).withCentre(c.getPointOnCircumference(kEncoderRadius + 10, angle)));
+        }
+        g.setColour(kLabel);
+        g.setFont(juce::FontOptions(12.0f));
+
+    }
+    // The patch knob's light ring, in the patch's colour.
+    {
+        const juce::Rectangle<float> ring = juce::Rectangle<float>(2 * (kDataRadius + 9), 2 * (kDataRadius + 9)).withCentre({kDataX, kDataY});
+        const juce::Colour colour = ledColour(lights_->patchRing, juce::Colour(0xff32363c));
+        if (lights_->patchRing != 0) {  // a soft glow outside the ring
+            g.setColour(colour.withAlpha(0.25f));
+            g.drawEllipse(ring.expanded(5), 6.0f);
+        }
+        g.setColour(colour);
+        g.drawEllipse(ring, 9.0f);
+    }
+    encoder({kDataX, kDataY}, kDataRadius);
+    g.setColour(kLabel);
+    g.setFont(juce::FontOptions(12.0f));
+    g.drawText("PATCH", juce::Rectangle<float>(80, 16).withCentre({kDataX, kDataY}), juce::Justification::centred);
+}
+
+
+void PanelView::paintPads(juce::Graphics& g) {
+    for (int row = 0; row < hydra::FrontPanel::kPadRows; ++row)
+        for (int column = 0; column < hydra::FrontPanel::kPadColumns; ++column) {
+            const juce::Rectangle<float> r = padBounds(row, column);
+            const std::uint32_t rgb = lights_->pads[static_cast<std::size_t>(row * hydra::FrontPanel::kPadColumns + column)];
+            g.setColour(ledColour(rgb, juce::Colour(0xff2e3238)));
+            g.fillRoundedRectangle(r, 6);
+            const bool held = active_.kind == Target::Kind::Pad &&
+                              active_.index == row * hydra::FrontPanel::kPadColumns + column;
+            g.setColour(held ? juce::Colours::white : juce::Colour(0xff4a4f58));
+            g.drawRoundedRectangle(r, 6, held ? 3.0f : 1.5f);
+            const char* legend = kPadLegends[row][column];
+            if (*legend) {
+                const juce::Rectangle<float> label(r.getX() - 10, r.getBottom() + 3, r.getWidth() + 20, 14);
+                g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+                if (std::strcmp(legend, "KEY") == 0) {  // printed on an orange field
+                    const juce::Rectangle<float> box = label.withSizeKeepingCentre(36, 14);
+                    g.setColour(kOrange);
+                    g.fillRoundedRectangle(box, 2);
+                    g.setColour(juce::Colour(0xff1b1d21));
+                    g.drawText(legend, box, juce::Justification::centred);
+                } else {
+                    g.setColour(kOrange);
+                    g.drawText(legend, label, juce::Justification::centred);
+                }
+            }
+        }
+}
+
+PanelView::Target PanelView::targetAt(juce::Point<float> p) const {
+    for (std::size_t i = 0; i < std::size(kButtons); ++i)
+        if (buttonBounds(kButtons[i]).contains(p))
+            return {Target::Kind::Button, static_cast<int>(i)};
+    for (std::size_t i = 0; i < std::size(kKnobs); ++i)
+        if (p.getDistanceFrom({kKnobs[i].x, kKnobs[i].y}) <= kKnobs[i].radius + 4)
+            return {Target::Kind::Knob, static_cast<int>(i)};
+    for (int e = 0; e < hydra::FrontPanel::kEncoders; ++e)
+        if (p.getDistanceFrom(encoderCentre(e)) <= kEncoderRadius + 12)
+            return {Target::Kind::Encoder, e};
+    if (p.getDistanceFrom({kDataX, kDataY}) <= kDataRadius)
+        return {Target::Kind::DataEncoder, 0};
+    for (int row = 0; row < hydra::FrontPanel::kPadRows; ++row)
+        for (int column = 0; column < hydra::FrontPanel::kPadColumns; ++column)
+            if (padBounds(row, column).contains(p))
+                return {Target::Kind::Pad, row * hydra::FrontPanel::kPadColumns + column};
+    return {};
+}
+
+void PanelView::setKnob(int index, float value) {
+    const Knob& k = kKnobs[index];
+    value = juce::jlimit(0.0f, 1.0f, value);
+    switch (k.kind) {
+    case Knob::Kind::Volume: processor_.outputGain().setValueNotifyingHost(value); break;
+    case Knob::Kind::Arp: {
+        const int positions = hydra::FrontPanel::kArpPositions[static_cast<std::size_t>(k.index)];
+        const int position = juce::roundToInt(value * static_cast<float>(positions - 1));
+        if (position != arpPositions_[static_cast<std::size_t>(k.index)]) {
+            arpPositions_[static_cast<std::size_t>(k.index)] = position;
+            processor_.panelInput({Input::Kind::ArpSwitch, k.index, position, 0});
+        }
+        break;
+    }
+    case Knob::Kind::Analog:
+        knobValues_[static_cast<std::size_t>(k.index)] = value;
+        processor_.panelInput({Input::Kind::Knob, k.index, 0, value});
+        break;
+    }
+    repaint();
+}
+
+void PanelView::turn(const Target& target, int detents) {
+    if (detents == 0)
+        return;
+    switch (target.kind) {
+    case Target::Kind::Encoder: processor_.panelInput({Input::Kind::Encoder, target.index, detents, 0}); break;
+    case Target::Kind::DataEncoder: processor_.panelInput({Input::Kind::DataEncoder, 0, detents, 0}); break;
+    case Target::Kind::Knob: {
+        const Knob& k = kKnobs[target.index];
+        if (k.kind == Knob::Kind::Arp) {
+            const int positions = hydra::FrontPanel::kArpPositions[static_cast<std::size_t>(k.index)];
+            const int position = arpPositions_[static_cast<std::size_t>(k.index)] + detents;
+            setKnob(target.index, static_cast<float>(position) / static_cast<float>(positions - 1));
+        } else {
+            const float value = k.kind == Knob::Kind::Volume ? processor_.outputGain().convertTo0to1(processor_.outputGain().get())
+                                                             : knobValues_[static_cast<std::size_t>(k.index)];
+            setKnob(target.index, value + 0.02f * static_cast<float>(detents));
+        }
+        break;
+    }
+    default: break;
+    }
+}
+
+void PanelView::mouseDown(const juce::MouseEvent& e) {
+    active_ = targetAt(toCanvas(e.position));
+    dragStartY_ = e.position.y;
+    dragAccumulator_ = 0;
+    switch (active_.kind) {
+    case Target::Kind::Button: {
+        const int id = kButtons[active_.index].id;
+        if (id == kShiftButton) {
+            if (shiftLatched_)
+                releaseShift(0);
+            else
+                pressShift();
+            shiftLatched_ = !shiftLatched_;
+            break;
+        }
+        int delay = 0;
+        if (shiftKeyHeld_) {
+            delay = kShiftLeadMs;  // SHIFT is down already; keep the order safe
+        } else if (!shiftLatched_ && e.mods.isShiftDown()) {
+            pressShift();
+            shiftForGesture_ = true;
+            delay = kShiftLeadMs;
+        }
+        processor_.panelInput({Input::Kind::Button, id, 1, 0, delay});
+        break;
+    }
+    case Target::Kind::Encoder:
+    case Target::Kind::DataEncoder:
+        if (!shiftLatched_ && !shiftKeyHeld_ && e.mods.isShiftDown()) {
+            pressShift();
+            shiftForGesture_ = true;
+        }
+        break;
+    case Target::Kind::Pad: {
+        // Pressure from where the pad is hit: harder towards its top.
+        const int row = active_.index / hydra::FrontPanel::kPadColumns, column = active_.index % hydra::FrontPanel::kPadColumns;
+        const juce::Rectangle<float> r = padBounds(row, column);
+        const float pressure = juce::jlimit(0.2f, 1.0f, 1.0f - (toCanvas(e.position).y - r.getY()) / r.getHeight() * 0.8f);
+        processor_.panelInput({Input::Kind::Pad, active_.index, 0, pressure});
+        break;
+    }
+    case Target::Kind::Knob: {
+        const Knob& k = kKnobs[active_.index];
+        dragValue_ = k.kind == Knob::Kind::Volume ? processor_.outputGain().convertTo0to1(processor_.outputGain().get())
+                     : k.kind == Knob::Kind::Arp
+                         ? static_cast<float>(arpPositions_[static_cast<std::size_t>(k.index)]) /
+                               static_cast<float>(hydra::FrontPanel::kArpPositions[static_cast<std::size_t>(k.index)] - 1)
+                         : knobValues_[static_cast<std::size_t>(k.index)];
+        break;
+    }
+    default: break;
+    }
+    repaint();
+}
+
+void PanelView::mouseDrag(const juce::MouseEvent& e) {
+    const float dy = dragStartY_ - e.position.y;  // up is positive
+    switch (active_.kind) {
+    case Target::Kind::Knob: setKnob(active_.index, dragValue_ + dy / 200.0f); break;
+    case Target::Kind::Encoder:
+    case Target::Kind::DataEncoder: {
+        // One detent per 8 pixels of vertical movement.
+        const float total = dy / 8.0f;
+        const int detents = static_cast<int>(total - dragAccumulator_);
+        dragAccumulator_ += static_cast<float>(detents);
+        turn(active_, detents);
+        break;
+    }
+    default: break;
+    }
+}
+
+void PanelView::mouseUp(const juce::MouseEvent&) {
+    switch (active_.kind) {
+    case Target::Kind::Button: {
+        const int id = kButtons[active_.index].id;
+        if (id == kShiftButton)
+            break;  // latched or released by the click itself
+        const int delay = shiftForGesture_ || shiftKeyHeld_ ? kShiftLeadMs : 0;
+        processor_.panelInput({Input::Kind::Button, id, 0, 0, delay});
+        if (shiftLatched_ || shiftForGesture_) {
+            releaseShift(delay + kShiftTrailMs);
+            shiftLatched_ = shiftForGesture_ = false;
+        }
+        break;
+    }
+    case Target::Kind::Encoder:
+    case Target::Kind::DataEncoder:
+        if (shiftForGesture_) {
+            releaseShift(kShiftTrailMs + 100);  // after the last detents
+            shiftForGesture_ = false;
+        }
+        break;
+    case Target::Kind::Pad: processor_.panelInput({Input::Kind::Pad, active_.index, 0, 0.0f}); break;
+    default: break;
+    }
+    active_ = {};
+    repaint();
+}
+
+void PanelView::pressShift() { processor_.panelInput({Input::Kind::Button, kShiftButton, 1, 0, 0}); }
+
+void PanelView::releaseShift(int delayMs) { processor_.panelInput({Input::Kind::Button, kShiftButton, 0, 0, delayMs}); }
+
+void PanelView::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) {
+    // A wheel notch (0.1-0.25 per notch, depending on the platform) is one detent.
+    wheelAccumulator_ += wheel.deltaY * 8.0f;
+    const int detents = static_cast<int>(wheelAccumulator_);
+    wheelAccumulator_ -= static_cast<float>(detents);
+    turn(targetAt(toCanvas(e.position)), detents);
+}

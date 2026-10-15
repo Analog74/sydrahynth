@@ -1,0 +1,8 @@
+build/
+external/
+# ASM firmware and manuals: user-supplied, never commit
+*.dat
+*.pdf
+*.hydra
+__pycache__/
+*.pyc
