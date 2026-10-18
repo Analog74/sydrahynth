@@ -7,9 +7,6 @@
 #include <cstring>
 #include <exception>
 #include <format>
-#include <thread>
-
-#include <sched.h>
 
 #include "a5pack.h"
 #include "sysex.h"
@@ -22,22 +19,6 @@ namespace {
 constexpr std::uint32_t kUserAreaStart = 0x7000000, kUserAreaEnd = 0x8000000;
 constexpr std::uint32_t kSector = 0x20000;
 // The boot (with the warm-up) lasts at least this long, in CPU ticks.
-// The DSP cores' threads: the emulator and the DSP thread keep a core each,
-// the rest (up to four) go to the DSP workers. They sync every sample, so
-// more threads than cores stall the emulator (on two cores four threads run
-// at 0.09 x real time, one at 1.0 x). Counts the cores the process may run
-// on (taskset, cgroups), not the machine's. HYDRA_DSP_THREADS overrides it.
-int defaultDspThreads() {
-    if (const char* threads = std::getenv("HYDRA_DSP_THREADS"))
-        return std::atoi(threads);
-    int cores = 0;
-    cpu_set_t set;
-    if (sched_getaffinity(0, sizeof set, &set) == 0)
-        cores = CPU_COUNT(&set);
-    if (cores <= 0)
-        cores = static_cast<int>(std::thread::hardware_concurrency());
-    return std::clamp(cores - 2, 1, 4);
-}
 // Diagnostic (HYDRA_BOOT_TRACE): emulated and wall time of the boot phases.
 void traceBoot(const char* phase, std::uint64_t ticks) {
     static const bool enabled = std::getenv("HYDRA_BOOT_TRACE") != nullptr;
@@ -104,7 +85,8 @@ void Emulator::start(const Config& config) {
         machineConfig.systemSettings = config.systemSettings;
         machineConfig.flash = config.flash;
         machine_ = std::make_unique<Machine>(*firmware_, machineConfig);
-        machine_->dspBlock().setThreads(config.dspThreads > 0 ? config.dspThreads : defaultDspThreads());
+        const char* threads = std::getenv("HYDRA_DSP_THREADS");
+        machine_->dspBlock().setThreads(threads ? std::atoi(threads) : config.dspThreads);
         machine_->profile().enabled = config.profile;
         machine_->onAudio = [this](std::int32_t left, std::int32_t right) { pushAudio(left, right); };
     } catch (const std::exception& e) {

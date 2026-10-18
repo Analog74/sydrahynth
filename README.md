@@ -100,7 +100,7 @@ Both effects DSPs run, so the stereo output carries the patch's effects
 (`--wav file` writes it as a 24-bit WAV).
 
 Speed: with `HYDRA_DSP_ASYNC=1 HYDRA_DSP_THREADS=4` (DSP side and effects on their
-own threads, DSP cores on four, as in the plugin on 6+ cores) the emulator runs at about
+own threads, DSP cores on four, as in the plugin) the emulator runs at about
 3.2 x real time on a Ryzen 7 5800X (`emurun` measures it, with the buffer target raised for the measurement: at the default 512 frames its 5 ms pulls would cap the reading at ~2.3 x). The limit is the
 main thread (main CPU and panel MCU); the DSP thread is about a quarter busy;
 `HYDRA_HOST_PROFILE=1` breaks the main thread's time down (JIT, panel, link,
@@ -119,11 +119,11 @@ in 50-cycle steps), the panel lagging up to 50 us between interactions so that
 it runs in longer stretches, the DSP cores compiled to x86-64
 (`src/dsp_jit.*`, bit-exact with the interpreter; `HYDRA_DSP_JIT=0` switches it
 off) and run in parallel, and the DSP side overlapped with the CPU.
-The plugin picks the DSP threads from the cores it may use: two stay for the
-emulator and the DSP thread, the rest (one to four) go to the DSP cores, since
-they sync every sample and more threads than cores stall everything (on two
-cores: 1.0 x real time with one thread, 0.09 x with four; on four cores 2.4 x
-with two). `HYDRA_DSP_THREADS` overrides it.
+The DSP cores sync every sample; rather than wait for a thread that has no
+CPU at the moment (more threads than free cores, as in a busy DAW), the others
+claim and run its DSP cores for that sample. So four threads are the fastest or
+close to it on any machine (2.4 x real time on four cores, 1.4 x on two, where
+a fixed split ran at 0.17 x and 0.10 x). `HYDRA_DSP_THREADS` sets the count.
 `HYDRA_PROFILE=1` prints
 the time per component; `HYDRA_SAMPLE=file` samples the main thread (all threads
 with `HYDRA_SAMPLE_ALL=1`) for `tools/symbolize_samples.py`;

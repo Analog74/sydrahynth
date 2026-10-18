@@ -74,11 +74,14 @@ public:
 
     // Runs all samples before `sample`.
     void advanceToSample(std::uint64_t sample);
-    // Runs the cores on `threads` threads (1-8; 1 = no worker threads). Core i runs
-    // on thread i % threads; the calling thread is thread 0. All cores of a sample
-    // finish before the next sample starts, as on the hardware, where they run
-    // concurrently; with more than one thread the order of their accesses to
-    // shared RAM within a sample is not fixed.
+    // Runs the cores on `threads` threads (1-8; 1 = no worker threads); the
+    // calling thread is thread 0. Each sample, every thread claims cores to run,
+    // its own first (core i belongs to thread i % threads), then those still
+    // unclaimed, so a worker the OS has not scheduled yet holds nobody up: the
+    // others run its cores. All cores of a sample finish before the next sample
+    // starts, as on the hardware, where they run concurrently; with more than
+    // one thread the order of their accesses to shared RAM within a sample is
+    // not fixed.
     void setThreads(int threads);
     // Diagnostic: wall ns the calling thread spent waiting for the workers (with profileSync).
     bool profileSync = false;
@@ -108,16 +111,19 @@ private:
     std::uint32_t* mailboxWord(std::uint32_t wordAddress);  // 0x1FC00-0x1FFFF
     std::uint32_t* cpuWord(std::uint32_t offset);
 
-    // Runs the cores assigned to `thread` for one sample; returns instructions.
-    std::uint64_t runCores(int thread);
+    // Runs the cores of one sample that `thread` claims, its own first, until
+    // none is left; returns instructions.
+    std::uint64_t runCores(int thread, std::uint64_t generation);
     void workerLoop(int thread, std::uint64_t seen);
     void stopWorkers();
 
     std::array<Core, kCores> cores_;
     int threads_ = 1;
     std::vector<std::thread> workers_;
-    std::atomic<std::uint64_t> generation_{0};  // bumped to release the workers for a sample
-    std::atomic<int> finished_{0};              // workers done with the current sample
+    // The sample being run (bits 8-63, counting up) and its cores not claimed
+    // yet (bits 0-7); a new value releases the workers.
+    std::atomic<std::uint64_t> claims_{0};
+    std::atomic<int> finished_{0};  // cores done with the current sample
     std::atomic<std::uint64_t> workerExecuted_{0};
     std::atomic<bool> quit_{false};
     std::vector<std::uint32_t> shared_;

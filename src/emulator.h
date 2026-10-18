@@ -29,9 +29,10 @@ public:
         std::string firmwarePath;                     // the Hydrasynth Desktop .dat firmware pack
         std::vector<Machine::Config::FlashBlock> flash;  // e.g. from a saved state
         std::map<std::pair<int, int>, std::int16_t> systemSettings;
-        // Threads for the DSP cores; 0 picks them from the cores the process
-        // may use (see defaultDspThreads()).
-        int dspThreads = 0;
+        // Threads for the DSP cores (HYDRA_DSP_THREADS overrides it). Four is
+        // the fastest or close to it from one core to sixteen: threads that do
+        // not get a core leave their DSP cores to the others (DspBlock).
+        int dspThreads = 4;
         bool profile = false;  // Machine::Profile (diagnostic)
         // Samples the emulator keeps buffered ahead of the audio thread (the
         // latency); see setTargetFill().

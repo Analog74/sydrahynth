@@ -3,8 +3,7 @@
 // to A001 (after `seconds`, default 0.5), then pulls audio in 512-frame blocks at
 // real-time pace while playing middle C, reports underruns, restarts with the
 // captured flash and plays again (state restore), and writes the first take as
-// a 32-bit float WAV. HYDRA_DSP_THREADS sets the DSP threads (default: from the
-// cores, see defaultDspThreads()), HYDRA_TARGET_FILL
+// a 32-bit float WAV. HYDRA_DSP_THREADS sets the DSP threads (default 4), HYDRA_TARGET_FILL
 // the frames the emulator keeps buffered, HYDRA_BLOCK the pull size (512);
 // HYDRA_SOAK runs a long panel soak test instead (see below).
 //

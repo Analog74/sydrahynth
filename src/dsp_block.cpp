@@ -1,8 +1,8 @@
 #include "dsp_block.h"
 
-#include <chrono>
-
 #include <algorithm>
+#include <bit>
+#include <chrono>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -21,17 +21,28 @@ DspBlock::DspBlock() : shared_(dsp::DspCore::kSharedWords), spareMailboxes_(0x30
 DspBlock::~DspBlock() { stopWorkers(); }
 
 namespace {
+constexpr std::uint64_t kOpenCores = 0xFF;  // in claims_
+// A worker spins this long (pauses) for the next sample before it sleeps.
+// Samples come every few microseconds, so a worker that keeps up spins; one
+// that comes late (its cores already run by others, as when there are more
+// threads than free cores) spins less each time, down to kMinSpins, and leaves
+// its core to the threads that do the work.
+constexpr int kMaxSpins = 8192, kMinSpins = 64;
+
+void pause() {
+#if defined(__x86_64__) || defined(__i386__)
+    _mm_pause();
+#endif
+}
+
 // Busy-waits briefly, then yields, so idle workers do not occupy a CPU for long.
 template <typename Done>
 void waitUntil(Done done) {
     for (int spins = 0; !done(); ++spins) {
-        if (spins < 4096) {
-#if defined(__x86_64__) || defined(__i386__)
-            _mm_pause();
-#endif
-        } else {
+        if (spins < 4096)
+            pause();
+        else
             std::this_thread::yield();
-        }
     }
 }
 }  // namespace
@@ -43,49 +54,69 @@ void DspBlock::setThreads(int threads) {
     stopWorkers();
     threads_ = threads;
     quit_ = false;
-    // The generation a worker starts from is taken here, not by the worker: a
+    // The sample a worker starts from is taken here, not by the worker: a
     // worker that starts late would otherwise take a sample already released
-    // for it as seen, and advanceToSample would wait for it forever.
-    const std::uint64_t seen = generation_.load(std::memory_order_acquire);
+    // for it as seen.
+    const std::uint64_t seen = claims_.load(std::memory_order_acquire) >> 8;
     for (int t = 1; t < threads_; ++t)
         workers_.emplace_back([this, t, seen] { workerLoop(t, seen); });
 }
 
 void DspBlock::stopWorkers() {
     quit_ = true;
-    generation_.fetch_add(1, std::memory_order_release);
-    generation_.notify_all();
+    claims_.store(((claims_.load(std::memory_order_relaxed) >> 8) + 1) << 8, std::memory_order_release);
+    claims_.notify_all();
     for (std::thread& worker : workers_)
         worker.join();
     workers_.clear();
     threads_ = 1;
 }
 
-std::uint64_t DspBlock::runCores(int thread) {
-    std::uint64_t executed = 0;
+std::uint64_t DspBlock::runCores(int thread, std::uint64_t generation) {
+    std::uint64_t own = 0;
     for (int i = thread; i < kCores; i += threads_)
-        if ((runMask_ >> i & 1) && !cores_[i].dsp->trapped())
-            executed += cores_[i].dsp->run(kInstructionsPerSample);
+        own |= 1u << i;
+    std::uint64_t executed = 0;
+    std::uint64_t claims = claims_.load(std::memory_order_acquire);
+    while (claims >> 8 == generation && (claims & kOpenCores)) {
+        // Own cores from the bottom; others' from the top, away from their owner.
+        const std::uint64_t open = claims & kOpenCores;
+        const int core = open & own ? std::countr_zero(open & own) : 63 - std::countl_zero(open);
+        if (!claims_.compare_exchange_weak(claims, claims & ~(1ull << core), std::memory_order_acq_rel,
+                                           std::memory_order_acquire))
+            continue;
+        const std::uint64_t n = cores_[core].dsp->run(kInstructionsPerSample);
+        if (thread == 0)
+            executed += n;
+        else
+            workerExecuted_.fetch_add(n, std::memory_order_relaxed);
+        finished_.fetch_add(1, std::memory_order_release);
+        claims = claims_.load(std::memory_order_acquire);
+    }
     return executed;
 }
 
 void DspBlock::workerLoop(int thread, std::uint64_t seen) {
+    int spinLimit = kMaxSpins;
     for (;;) {
         // Spin while samples come quickly; sleep when the DSP side pauses.
-        for (int spins = 0; generation_.load(std::memory_order_acquire) == seen; ++spins) {
-            if (spins < 8192) {
-#if defined(__x86_64__) || defined(__i386__)
-                _mm_pause();
-#endif
-            } else {
-                generation_.wait(seen, std::memory_order_acquire);
-            }
+        std::uint64_t claims = claims_.load(std::memory_order_acquire);
+        for (int spins = 0; claims >> 8 == seen; ++spins) {
+            if (spins < spinLimit)
+                pause();
+            else
+                claims_.wait(claims, std::memory_order_acquire);
+            claims = claims_.load(std::memory_order_acquire);
         }
-        seen = generation_.load(std::memory_order_acquire);
+        seen = claims >> 8;
         if (quit_)
             return;
-        workerExecuted_.fetch_add(runCores(thread), std::memory_order_relaxed);
-        finished_.fetch_add(1, std::memory_order_release);
+        if (claims & kOpenCores) {
+            spinLimit = std::min(spinLimit * 2, kMaxSpins);
+            runCores(thread, seen);
+        } else {
+            spinLimit = std::max(spinLimit / 2, kMinSpins);
+        }
     }
 }
 
@@ -175,18 +206,25 @@ void DspBlock::advanceToSample(std::uint64_t target) {
     while (sample_ < target) {
         if (onSampleStart)
             onSampleStart(ports_.data());
+        std::uint64_t open = 0;
         for (int i = 0; i < kCores; ++i)
-            if ((runMask_ >> i & 1) && !cores_[i].dsp->trapped())
+            if ((runMask_ >> i & 1) && !cores_[i].dsp->trapped()) {
                 cores_[i].dsp->raiseInterrupt(2);
+                open |= 1u << i;
+            }
         if (threads_ == 1) {
-            executed_ += runCores(0);
+            for (int i = 0; i < kCores; ++i)
+                if (open >> i & 1)
+                    executed_ += cores_[i].dsp->run(kInstructionsPerSample);
         } else {
             finished_.store(0, std::memory_order_relaxed);
-            generation_.fetch_add(1, std::memory_order_release);
-            generation_.notify_all();  // a syscall only if a worker sleeps
-            executed_ += runCores(0);
+            const std::uint64_t generation = (claims_.load(std::memory_order_relaxed) >> 8) + 1;
+            claims_.store(generation << 8 | open, std::memory_order_release);
+            claims_.notify_all();  // a syscall only if a worker sleeps
+            executed_ += runCores(0, generation);
             const auto waitStart = profileSync ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            waitUntil([&] { return finished_.load(std::memory_order_acquire) == threads_ - 1; });
+            const int cores = std::popcount(open);
+            waitUntil([&] { return finished_.load(std::memory_order_acquire) == cores; });
             if (profileSync)
                 syncNs += static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count());
