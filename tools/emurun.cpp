@@ -3,7 +3,8 @@
 // to A001 (after `seconds`, default 0.5), then pulls audio in 512-frame blocks at
 // real-time pace while playing middle C, reports underruns, restarts with the
 // captured flash and plays again (state restore), and writes the first take as
-// a 32-bit float WAV. HYDRA_DSP_THREADS sets the DSP threads, HYDRA_TARGET_FILL
+// a 32-bit float WAV. HYDRA_DSP_THREADS sets the DSP threads (default: from the
+// cores, see defaultDspThreads()), HYDRA_TARGET_FILL
 // the frames the emulator keeps buffered, HYDRA_BLOCK the pull size (512);
 // HYDRA_SOAK runs a long panel soak test instead (see below).
 //
@@ -64,8 +65,6 @@ int main(int argc, char** argv) {
     config.firmwarePath = argv[1];
     config.profile = true;
     config.systemSettings = {{{5, 7}, 1}};  // PgmChgRX on, as the plugin does
-    if (const char* t = std::getenv("HYDRA_DSP_THREADS"))
-        config.dspThreads = std::atoi(t);
     if (const char* t = std::getenv("HYDRA_TARGET_FILL"))
         config.targetFill = static_cast<std::size_t>(std::atoi(t));
     const std::size_t kBlock = std::getenv("HYDRA_BLOCK") ? static_cast<std::size_t>(std::atoi(std::getenv("HYDRA_BLOCK"))) : 512;
