@@ -540,6 +540,19 @@ results to the DSP; addresses are A5 code/DRAM addresses.
   running cores without waiting, as on the hardware. Effects then run on their own thread too, with I2C
   accesses queued by sample. Parameter writes may land a sample later or
   earlier than single-threaded, so runs are not bit-identical.
+- The DSP side's lag behind the CPU is bounded: after each run chunk the CPU
+  waits while the DSP side is more than 2 ms (88 samples) behind
+  (`Machine::boundDspLag`). Without the bound a DSP side slower than the CPU
+  (one DSP thread, few or busy cores, and the unpaced boot) fell behind
+  without limit, and since MIDI arrives in CPU time a note was heard that
+  much later: 5 s with one DSP thread (found by a Windows port's headless test,
+  where the note came out silent). With the bound the lag stays at 2-3 ms and
+  four DSP threads cost nothing (3.0 x real time as before); waiting at every
+  chunk instead (`HYDRA_DSP_SETTLE`) would serialise CPU and DSP side.
+- `DspBlock::setThreads` takes the workers' starting generation before it
+  launches them: a worker that started late used to take the first sample as
+  already seen, and `advanceToSample` waited for it forever (on one core it
+  hung at once; `tools/dsp_start_race.cpp` reproduces it).
 
 ## Boot status (firmware 2.2.0)
 

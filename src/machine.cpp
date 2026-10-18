@@ -496,6 +496,23 @@ void Machine::waitDsp() {
             std::this_thread::yield();
 }
 
+void Machine::boundDspLag() {
+    // The DSP side runs on its own thread, behind the CPU. Without a bound a
+    // DSP side slower than the CPU (fewer DSP threads, a busy or slower machine,
+    // the unpaced boot) falls behind without limit, and MIDI, which arrives in
+    // CPU time, is heard that much later (5 s were measured with one DSP
+    // thread). Waiting only beyond kMaxDspLagSamples keeps the two in parallel.
+    if (!dspAsync_)
+        return;
+    const std::uint64_t target = dspRequested_.load(std::memory_order_relaxed);
+    if (target <= kMaxDspLagSamples || dspReached_.load(std::memory_order_acquire) + kMaxDspLagSamples >= target)
+        return;
+    const ScopedTime t(profile_.enabled, profile_.dspWait);
+    for (int spins = 0; dspReached_.load(std::memory_order_acquire) + kMaxDspLagSamples < target; ++spins)
+        if (spins > 4096)
+            std::this_thread::yield();
+}
+
 void Machine::dspThreadLoop() {
     std::uint64_t reached = 0;
     for (int spins = 0; !dspQuit_.load(std::memory_order_relaxed);) {
@@ -590,6 +607,8 @@ Machine::Status Machine::run(std::uint64_t ticks, bool settle) {
     if (settle) {
         waitDsp();
         raiseDspInterrupts();
+    } else {
+        boundDspLag();
     }
     return Status::Running;
 }

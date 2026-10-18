@@ -135,6 +135,11 @@ public:
     void sendMidi(std::initializer_list<std::uint8_t> bytes);
     void sendMidi(const std::vector<std::uint8_t>& bytes);
     DspBlock& dspBlock() { return *dsp_; }
+    // Diagnostic: how many samples the DSP side is behind the CPU (racy read).
+    std::uint64_t dspLag() const {
+        const std::uint64_t requested = dspRequested_.load(std::memory_order_relaxed), done = dspReached_.load(std::memory_order_relaxed);
+        return requested > done ? requested - done : 0;
+    }
     Memory& memory() { return memory_; }
     A5Gpio& gpio() { return *gpio_; }
     A5Adc& adc() { return *adc_; }
@@ -176,6 +181,9 @@ private:
     void processEffects(std::uint32_t* ports);
     // Brings the DSP side up to `sample` (asynchronously with Config::dspThread).
     void requestDsp(std::uint64_t sample);
+    // Waits while the DSP side is more than kMaxDspLagSamples behind the CPU.
+    void boundDspLag();
+    static constexpr std::uint64_t kMaxDspLagSamples = 88;  // 2 ms
     // Waits until the DSP side has reached the last requested sample.
     void waitDsp();
     void advanceDsp(std::uint64_t sample);

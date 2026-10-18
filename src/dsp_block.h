@@ -110,7 +110,7 @@ private:
 
     // Runs the cores assigned to `thread` for one sample; returns instructions.
     std::uint64_t runCores(int thread);
-    void workerLoop(int thread);
+    void workerLoop(int thread, std::uint64_t seen);
     void stopWorkers();
 
     std::array<Core, kCores> cores_;

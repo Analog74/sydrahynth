@@ -43,8 +43,12 @@ void DspBlock::setThreads(int threads) {
     stopWorkers();
     threads_ = threads;
     quit_ = false;
+    // The generation a worker starts from is taken here, not by the worker: a
+    // worker that starts late would otherwise take a sample already released
+    // for it as seen, and advanceToSample would wait for it forever.
+    const std::uint64_t seen = generation_.load(std::memory_order_acquire);
     for (int t = 1; t < threads_; ++t)
-        workers_.emplace_back([this, t] { workerLoop(t); });
+        workers_.emplace_back([this, t, seen] { workerLoop(t, seen); });
 }
 
 void DspBlock::stopWorkers() {
@@ -65,8 +69,7 @@ std::uint64_t DspBlock::runCores(int thread) {
     return executed;
 }
 
-void DspBlock::workerLoop(int thread) {
-    std::uint64_t seen = generation_.load(std::memory_order_acquire);
+void DspBlock::workerLoop(int thread, std::uint64_t seen) {
     for (;;) {
         // Spin while samples come quickly; sleep when the DSP side pauses.
         for (int spins = 0; generation_.load(std::memory_order_acquire) == seen; ++spins) {

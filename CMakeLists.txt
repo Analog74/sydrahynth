@@ -114,3 +114,7 @@ if (HYDRA_BUILD_PLUGIN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/JUCE/CMak
     target_link_libraries(plugintest PRIVATE hydra_core juce::juce_audio_processors juce::juce_audio_formats
         juce::juce_recommended_config_flags)
 endif()
+
+
+add_executable(dsp_start_race tools/dsp_start_race.cpp)
+target_link_libraries(dsp_start_race PRIVATE hydra_core)
