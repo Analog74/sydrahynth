@@ -671,6 +671,82 @@ int main(int argc, char** argv) {
         next = Clock::now();
     };
     measureUnpaced("no patch");
+    // HYDRA_LOAD_TEST=i,j,...: the cost of patches i, j, ... of the bank (each
+    // uploaded to A001) silent, with one note and with eight, as core time per
+    // emulated second of the DSP cores, the main CPU and the panel MCU, and
+    // whether the arpeggiator is on (HYDRA_LOAD_ARP toggles it after loading;
+    // HYDRA_LOAD_PAGE=<button> presses a panel button then). Writes the
+    // displays to <out.wav>.load<i>.pgm.
+    if (const char* list = std::getenv("HYDRA_LOAD_TEST"); list && argc > 3) {
+        const std::vector<Patch> patches = loadPatches(argv[3]);
+        const auto cost = [&] {
+            const std::uint64_t before = emulator.framesProduced();
+            emulator.setTargetFill(1 << 14);
+            const Machine::Profile p0 = emulator.profile();
+            const auto t0 = Clock::now();
+            std::vector<float> sink(65536);
+            while (Clock::now() - t0 < std::chrono::milliseconds(1500)) {
+                emulator.readAudio(sink.data(), sink.data() + 32768, 32768);
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            const Machine::Profile p1 = emulator.profile();
+            emulator.setTargetFill(config.targetFill);
+            const double emulated = double(emulator.framesProduced() - before) / Emulator::kSampleRate;
+            std::printf("  DSP %.2f CPU %.2f panel %.2f", (p1.dspCores - p0.dspCores) / 1e9 / emulated,
+                        (p1.cpu - p0.cpu) / 1e9 / emulated, (p1.panel - p0.panel) / 1e9 / emulated);
+        };
+        pull(0.5, false);
+        for (const char* at = list; *at;) {
+            const std::size_t index = std::strtoul(at, nullptr, 10);
+            for (const auto& message : sysex::patchUpload(patches.at(index).body, 0, 0, true)) {
+                emulator.sendMidi(message.data(), message.size());
+                pull(0.1, false);
+            }
+            pull(0.5, false);
+            if (std::getenv("HYDRA_LOAD_ARP")) {  // toggle the arpeggiator (ARP ON)
+                emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 1, 0});
+                pull(0.15, false);
+                emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 0, 0});
+                pull(0.5, false);
+            }
+            if (const char* page = std::getenv("HYDRA_LOAD_PAGE")) {  // press this panel button (a module page)
+                emulator.panelInput({Emulator::PanelInput::Kind::Button, std::atoi(page), 1, 0});
+                pull(0.15, false);
+                emulator.panelInput({Emulator::PanelInput::Kind::Button, std::atoi(page), 0, 0});
+                pull(0.5, false);
+            }
+            FrontPanel::Lights lights;
+            std::uint64_t generation = 0;
+            emulator.readPanel(lights, generation);
+            if (std::FILE* f = std::fopen(std::format("{}.load{}.pgm", argv[2], index).c_str(), "wb")) {
+                std::fprintf(f, "P5\n128 %zu\n255\n", lights.displays.size() * 64);
+                for (const auto& display : lights.displays)
+                    std::fwrite(display.data(), 1, display.size(), f);
+                std::fclose(f);
+            }
+            std::printf("%3zu %-16s arp %s silent:", index, patches[index].name.c_str(), lights.buttons[30] > 0.5f ? "on " : "off");
+            cost();
+            const std::uint8_t on[] = {0x90, 60, 100};
+            emulator.sendMidi(on, 3);
+            std::printf(" | 1 note:");
+            cost();
+            for (const int note : {48, 52, 55, 64, 67, 71, 72})
+                emulator.sendMidi(std::array<std::uint8_t, 3>{0x90, static_cast<std::uint8_t>(note), 100}.data(), 3);
+            std::printf(" | 8 notes:");
+            cost();
+            std::printf("\n");
+            std::fflush(stdout);
+            for (const int note : {48, 52, 55, 60, 64, 67, 71, 72})
+                emulator.sendMidi(std::array<std::uint8_t, 3>{0x80, static_cast<std::uint8_t>(note), 0}.data(), 3);
+            pull(1.0, false);
+            while (*at && *at != ',')
+                ++at;
+            if (*at == ',')
+                ++at;
+        }
+        emulator.stop();
+        return 0;
+    }
     pull(argc > 4 ? std::atof(argv[4]) : 0.5, false);  // let the buffer settle (and the firmware finish starting)
     if (argc > 3) {
         std::vector<Patch> patches = loadPatches(argv[3]);
