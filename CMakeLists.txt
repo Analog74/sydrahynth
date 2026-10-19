@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
+# The DSP JIT emits x86-64 code, so on macOS build x86_64 (runs under Rosetta 2 on
+# Apple Silicon) unless an architecture is given. Must precede project().
+if (APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
+    set(CMAKE_OSX_ARCHITECTURES x86_64 CACHE STRING "")
+endif()
 project(sydrahynth VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -16,6 +21,8 @@ set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
 add_subdirectory(external/dynarmic EXCLUDE_FROM_ALL)
+# Dynarmic's public headers include Boost, but it links Boost privately.
+find_package(Boost 1.57 REQUIRED)
 
 add_library(hydra_core STATIC
     src/a5_peripherals.cpp
@@ -45,7 +52,7 @@ add_library(hydra_core STATIC
     src/wave_rom.cpp
 )
 target_include_directories(hydra_core PUBLIC src)
-target_link_libraries(hydra_core PUBLIC dynarmic merry::mcl PRIVATE xbyak::xbyak)
+target_link_libraries(hydra_core PUBLIC dynarmic merry::mcl Boost::headers PRIVATE xbyak::xbyak)
 # Same Xbyak configuration as Dynarmic: its inline functions are shared (ODR).
 target_compile_definitions(hydra_core PRIVATE XBYAK_STRICT_CHECK_MEM_REG_SIZE=0)
 target_compile_options(hydra_core PRIVATE -Wall -Wextra)

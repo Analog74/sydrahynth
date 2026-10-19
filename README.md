@@ -15,6 +15,10 @@ standalone app in `build/Sydrahynth_artefacts/<config>/`. Install by
 copying `VST3/Sydrahynth.vst3` to `~/.vst3/` and `LV2/Sydrahynth.lv2` to
 `~/.lv2/`.
 
+On macOS the tools (not yet the plugin) build as x86_64 and run under Rosetta 2 on
+Apple Silicon, since the DSP JIT emits x86-64 code. Boost comes from Homebrew
+(`brew install boost cmake ninja`); build with `-DHYDRA_BUILD_PLUGIN=OFF`.
+
 ## License
 
 Sydrahynth is free software, licensed under the GNU Affero General Public
