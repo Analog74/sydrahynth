@@ -4,6 +4,12 @@ Sydrahynth is a Linux plugin that emulates ASM's Hydrasynth Desktop. It runs ASM
 Hydrasynth Desktop firmware on an emulated main board. No firmware is included:
 you supply `Hydrasynth_Desktop_Firmware_2.2.0.dat` from ASM's firmware pack.
 
+
+
+https://github.com/user-attachments/assets/9b7ed8db-5732-41ab-bc41-2bdd0075680c
+
+
+
 ## Build
 
     scripts/fetch-deps.sh
