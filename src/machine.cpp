@@ -11,6 +11,10 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 namespace hydra {
 
 namespace {
@@ -479,7 +483,12 @@ void Machine::requestDsp(std::uint64_t sample) {
     if (sample <= dspRequested_.load(std::memory_order_relaxed))
         return;
     if (!dspThread_.joinable())
-        dspThread_ = std::thread([this] { dspThreadLoop(); });
+        dspThread_ = std::thread([this] {
+#if defined(__linux__)
+            pthread_setname_np(pthread_self(), "dsp");  // shown by top -H and ps -L
+#endif
+            dspThreadLoop();
+        });
     dspRequested_.store(sample, std::memory_order_release);
     dspRequested_.notify_one();  // a syscall only if the DSP thread sleeps
 }
@@ -491,9 +500,7 @@ void Machine::waitDsp() {
     if (dspReached_.load(std::memory_order_acquire) >= target)
         return;
     const ScopedTime t(profile_.enabled, profile_.dspWait);
-    for (int spins = 0; dspReached_.load(std::memory_order_acquire) < target; ++spins)
-        if (spins > 4096)
-            std::this_thread::yield();
+    waitDspReached(target);
 }
 
 void Machine::boundDspLag() {
@@ -508,9 +515,20 @@ void Machine::boundDspLag() {
     if (target <= kMaxDspLagSamples || dspReached_.load(std::memory_order_acquire) + kMaxDspLagSamples >= target)
         return;
     const ScopedTime t(profile_.enabled, profile_.dspWait);
-    for (int spins = 0; dspReached_.load(std::memory_order_acquire) + kMaxDspLagSamples < target; ++spins)
+    waitDspReached(target - kMaxDspLagSamples);
+}
+
+void Machine::waitDspReached(std::uint64_t sample) {
+    // Spins briefly, then sleeps until the DSP thread reports progress: the CPU
+    // side is usually the faster one and waits here often, and yielding in a
+    // loop kept a core busy for all that time.
+    for (int spins = 0;; ++spins) {
+        const std::uint64_t reached = dspReached_.load(std::memory_order_acquire);
+        if (reached >= sample)
+            return;
         if (spins > 4096)
-            std::this_thread::yield();
+            dspReached_.wait(reached, std::memory_order_acquire);
+    }
 }
 
 void Machine::dspThreadLoop() {
@@ -528,6 +546,7 @@ void Machine::dspThreadLoop() {
         advanceDsp(target);
         reached = target;
         dspReached_.store(reached, std::memory_order_release);
+        dspReached_.notify_all();  // a syscall only if the CPU side sleeps in waitDspReached
     }
 }
 

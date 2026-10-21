@@ -186,6 +186,7 @@ private:
     static constexpr std::uint64_t kMaxDspLagSamples = 88;  // 2 ms
     // Waits until the DSP side has reached the last requested sample.
     void waitDsp();
+    void waitDspReached(std::uint64_t sample);
     void advanceDsp(std::uint64_t sample);
     void dspThreadLoop();
     void raiseDspInterrupts();

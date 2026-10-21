@@ -83,7 +83,10 @@ private:
     std::deque<Op> ops_;
     std::atomic<std::size_t> pendingOps_{0};
     std::atomic<bool> flushRequested_{false};
-    // The worker sleeps on wake_ when idle (sleeping_ set); producers bump it.
+    // The worker sleeps on wake_ when idle (sleeping_ set); producers bump it,
+    // push() only every kWakeBatch samples (the worker then runs that far
+    // behind, which only the audio buffer sees: I2C reads flush first).
+    static constexpr std::uint64_t kWakeBatch = 32;
     std::atomic<bool> sleeping_{false};
     std::atomic<std::uint64_t> wake_{0};
     void wakeWorker();

@@ -2,6 +2,10 @@
 
 #include <chrono>
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -52,7 +56,12 @@ EffectsRack::EffectsRack(bool threaded) : threaded_(threaded) {
         ports_[i] = std::make_unique<Port>(*this, i);
     if (threaded_) {
         ring_.resize(kRingSize);
-        worker_ = std::thread([this] { workerLoop(); });
+        worker_ = std::thread([this] {
+#if defined(__linux__)
+            pthread_setname_np(pthread_self(), "fx");  // shown by top -H and ps -L
+#endif
+            workerLoop();
+        });
     }
 }
 
@@ -75,7 +84,8 @@ void EffectsRack::push(const std::uint32_t* ports) {
     waitUntil([&] { return index - processed_.load(std::memory_order_acquire) < kRingSize; });
     ring_[index % kRingSize] = sample;
     pushed_.store(index + 1, std::memory_order_seq_cst);
-    wakeWorker();
+    if ((index + 1) % kWakeBatch == 0)
+        wakeWorker();
 }
 
 void EffectsRack::wakeWorker() {
@@ -154,17 +164,14 @@ void EffectsRack::workerLoop() {
         if (pushed_.load(std::memory_order_acquire) == next) {
             if (flushRequested_.exchange(false, std::memory_order_acq_rel))
                 applyOps(UINT64_MAX);
-            // Out of samples: spin briefly (they come every ~20 us), then sleep
-            // until push() or flush() wakes us.
+            // Out of samples: sleep until push() (every kWakeBatch samples) or
+            // flush() wakes us. Not spinning: the samples come one at a time as
+            // the DSP side runs, and waiting for each kept this thread busy for
+            // as long as the DSP side ran (half a core at real-time pace).
             const auto ready = [&] {
                 return pushed_.load(std::memory_order_acquire) != next || quit_.load(std::memory_order_relaxed) ||
                        flushRequested_.load(std::memory_order_acquire);
             };
-            for (int spins = 0; spins < 1024 && !ready(); ++spins) {
-#if defined(__x86_64__) || defined(__i386__)
-                _mm_pause();
-#endif
-            }
             if (!ready()) {
                 const std::uint64_t seen = wake_.load(std::memory_order_seq_cst);
                 sleeping_.store(true, std::memory_order_seq_cst);

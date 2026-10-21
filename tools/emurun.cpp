@@ -19,6 +19,8 @@
 #include <cstring>
 #include <thread>
 #include <type_traits>
+
+#include <sys/resource.h>
 #include <vector>
 
 #include "emulator.h"
@@ -674,7 +676,7 @@ int main(int argc, char** argv) {
     // HYDRA_ARP_PLAY=<seconds>: turns the arpeggiator on (ARP ON), holds middle C
     // and pulls audio at real-time pace like a host for that long; writes the
     // take to <out.wav> and lists when underruns happened (wall seconds), for
-    // checking the arpeggio's timing.
+    // checking the arpeggio's timing; reports the process's CPU use meanwhile.
     if (const char* play = std::getenv("HYDRA_ARP_PLAY")) {
         pull(1.0, false);
         if (argc > 3) {  // patch HYDRA_ARP_PATCH (default 0) of the bank to A001
@@ -695,6 +697,12 @@ int main(int argc, char** argv) {
         emulator.sendMidi(on, 3);
         const auto blocks = static_cast<int>(std::atof(play) * Emulator::kSampleRate / kBlock);
         const auto start = Clock::now();
+        const auto cpuTime = [] {
+            rusage usage{};
+            getrusage(RUSAGE_SELF, &usage);
+            return usage.ru_utime.tv_sec + usage.ru_stime.tv_sec + 1e-6 * (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+        };
+        const double cpuStart = cpuTime();
         std::uint64_t underruns = emulator.underruns();
         int late = 0;
         for (int b = 0; b < blocks; ++b) {
@@ -712,8 +720,9 @@ int main(int argc, char** argv) {
                 out.push_back(right[i]);
             }
         }
-        std::printf("arp play: %d blocks, %d woken late, slowest run chunk %llu us\n", blocks, late,
-                    static_cast<unsigned long long>(emulator.slowestChunkMicros()));
+        std::printf("arp play: %d blocks, %d woken late, slowest run chunk %llu us, CPU %.2f cores\n", blocks, late,
+                    static_cast<unsigned long long>(emulator.slowestChunkMicros()),
+                    (cpuTime() - cpuStart) / std::chrono::duration<double>(Clock::now() - start).count());
         writeFloatWav(argv[2], out);
         emulator.stop();
         return 0;

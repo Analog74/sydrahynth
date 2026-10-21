@@ -4,6 +4,10 @@
 #include <bit>
 #include <chrono>
 
+#if defined(__linux__)
+#include <pthread.h>
+#endif
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -22,12 +26,16 @@ DspBlock::~DspBlock() { stopWorkers(); }
 
 namespace {
 constexpr std::uint64_t kOpenCores = 0xFF;  // in claims_
-// A worker spins this long (pauses) for the next sample before it sleeps.
-// Samples come every few microseconds, so a worker that keeps up spins; one
-// that comes late (its cores already run by others, as when there are more
-// threads than free cores) spins less each time, down to kMinSpins, and leaves
-// its core to the threads that do the work.
-constexpr int kMaxSpins = 8192, kMinSpins = 64;
+// A worker spins this long for the next sample before it sleeps. While the
+// emulator runs, samples come every few microseconds, so a worker that keeps
+// up spins; at real-time pace the emulator also pauses for hundreds of
+// microseconds at a time, which the workers sleep through. A time, not a
+// count of pauses: a pause takes about 140 cycles on recent Intel cores and
+// far fewer on AMD's, and a count fit for one spun most of the pauses away on
+// the other. A worker that comes late (its cores already run by others, as
+// when there are more threads than free cores) spins less each time, down to
+// kMinSpin, and leaves its core to the threads that do the work.
+constexpr std::chrono::nanoseconds kMaxSpin = std::chrono::microseconds(30), kMinSpin = std::chrono::microseconds(1);
 
 void pause() {
 #if defined(__x86_64__) || defined(__i386__)
@@ -59,7 +67,12 @@ void DspBlock::setThreads(int threads) {
     // for it as seen.
     const std::uint64_t seen = claims_.load(std::memory_order_acquire) >> 8;
     for (int t = 1; t < threads_; ++t)
-        workers_.emplace_back([this, t, seen] { workerLoop(t, seen); });
+        workers_.emplace_back([this, t, seen] {
+#if defined(__linux__)
+            pthread_setname_np(pthread_self(), "dsp-worker");  // shown by top -H and ps -L
+#endif
+            workerLoop(t, seen);
+        });
 }
 
 void DspBlock::stopWorkers() {
@@ -97,25 +110,30 @@ std::uint64_t DspBlock::runCores(int thread, std::uint64_t generation) {
 }
 
 void DspBlock::workerLoop(int thread, std::uint64_t seen) {
-    int spinLimit = kMaxSpins;
+    using Clock = std::chrono::steady_clock;
+    std::chrono::nanoseconds spinLimit = kMaxSpin;
     for (;;) {
         // Spin while samples come quickly; sleep when the DSP side pauses.
         std::uint64_t claims = claims_.load(std::memory_order_acquire);
-        for (int spins = 0; claims >> 8 == seen; ++spins) {
-            if (spins < spinLimit)
+        if (claims >> 8 == seen) {
+            const Clock::time_point until = Clock::now() + spinLimit;
+            for (int spins = 1; claims >> 8 == seen; ++spins) {
                 pause();
-            else
-                claims_.wait(claims, std::memory_order_acquire);
-            claims = claims_.load(std::memory_order_acquire);
+                if (spins % 16 == 0 && Clock::now() > until) {
+                    claims_.wait(claims, std::memory_order_acquire);
+                    spins = 0;
+                }
+                claims = claims_.load(std::memory_order_acquire);
+            }
         }
         seen = claims >> 8;
         if (quit_)
             return;
         if (claims & kOpenCores) {
-            spinLimit = std::min(spinLimit * 2, kMaxSpins);
+            spinLimit = std::min(spinLimit * 2, kMaxSpin);
             runCores(thread, seen);
         } else {
-            spinLimit = std::max(spinLimit / 2, kMinSpins);
+            spinLimit = std::max(spinLimit / 2, kMinSpin);
         }
     }
 }
