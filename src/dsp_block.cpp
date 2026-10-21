@@ -4,13 +4,11 @@
 #include <bit>
 #include <chrono>
 
-#if defined(__linux__)
-#include <pthread.h>
-#endif
-
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
+
+#include "threads.h"
 
 namespace hydra {
 
@@ -68,9 +66,7 @@ void DspBlock::setThreads(int threads) {
     const std::uint64_t seen = claims_.load(std::memory_order_acquire) >> 8;
     for (int t = 1; t < threads_; ++t)
         workers_.emplace_back([this, t, seen] {
-#if defined(__linux__)
-            pthread_setname_np(pthread_self(), "dsp-worker");  // shown by top -H and ps -L
-#endif
+            initEmulatorThread("dsp-worker");
             workerLoop(t, seen);
         });
 }

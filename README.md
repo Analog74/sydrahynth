@@ -124,6 +124,10 @@ CPU at the moment (more threads than free cores, as in a busy DAW), the others
 claim and run its DSP cores for that sample. So four threads are the fastest or
 close to it on any machine (2.4 x real time on four cores, 1.4 x on two, where
 a fixed split ran at 0.17 x and 0.10 x). `HYDRA_DSP_THREADS` sets the count.
+For the same reason the emulator's threads stay off cores with less than half
+the capacity of the fastest (the low-power E-cores of Intel's Core Ultra chips):
+one thread there held up every sample, with underruns on a Core Ultra 5 235H.
+`HYDRA_ALL_CORES=1` lets them use every core.
 `HYDRA_PROFILE=1` prints
 the time per component; `HYDRA_SAMPLE=file` samples the main thread (all threads
 with `HYDRA_SAMPLE_ALL=1`) for `tools/symbolize_samples.py`;

@@ -1,5 +1,6 @@
 #include "machine.h"
 
+#include "threads.h"
 #include "wave_rom.h"
 
 #include <algorithm>
@@ -10,10 +11,6 @@
 #include <format>
 #include <stdexcept>
 #include <utility>
-
-#if defined(__linux__)
-#include <pthread.h>
-#endif
 
 namespace hydra {
 
@@ -484,9 +481,7 @@ void Machine::requestDsp(std::uint64_t sample) {
         return;
     if (!dspThread_.joinable())
         dspThread_ = std::thread([this] {
-#if defined(__linux__)
-            pthread_setname_np(pthread_self(), "dsp");  // shown by top -H and ps -L
-#endif
+            initEmulatorThread("dsp");
             dspThreadLoop();
         });
     dspRequested_.store(sample, std::memory_order_release);

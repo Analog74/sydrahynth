@@ -703,6 +703,7 @@ int main(int argc, char** argv) {
             return usage.ru_utime.tv_sec + usage.ru_stime.tv_sec + 1e-6 * (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
         };
         const double cpuStart = cpuTime();
+        emulator.resetChunkStats();
         std::uint64_t underruns = emulator.underruns();
         int late = 0;
         for (int b = 0; b < blocks; ++b) {
@@ -720,8 +721,8 @@ int main(int argc, char** argv) {
                 out.push_back(right[i]);
             }
         }
-        std::printf("arp play: %d blocks, %d woken late, slowest run chunk %llu us, CPU %.2f cores\n", blocks, late,
-                    static_cast<unsigned long long>(emulator.slowestChunkMicros()),
+        std::printf("arp play: %d blocks, %d woken late, slowest run chunk %llu us, %llu over 2 ms, CPU %.2f cores\n", blocks, late,
+                    static_cast<unsigned long long>(emulator.slowestChunkMicros()), static_cast<unsigned long long>(emulator.slowChunks()),
                     (cpuTime() - cpuStart) / std::chrono::duration<double>(Clock::now() - start).count());
         writeFloatWav(argv[2], out);
         emulator.stop();

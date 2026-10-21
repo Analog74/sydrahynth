@@ -41,6 +41,7 @@ add_library(hydra_core STATIC
     src/spi.cpp
     src/stm32.cpp
     src/sysex.cpp
+    src/threads.cpp
     src/tone_generator.cpp
     src/wave_rom.cpp
 )

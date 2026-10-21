@@ -8,12 +8,9 @@
 #include <exception>
 #include <format>
 
-#if defined(__linux__)
-#include <pthread.h>
-#endif
-
 #include "a5pack.h"
 #include "sysex.h"
+#include "threads.h"
 
 namespace hydra {
 
@@ -113,9 +110,7 @@ void Emulator::start(const Config& config) {
     state_ = State::Booting;
     traceBoot("machine built", 0);
     thread_ = std::thread([this] {
-#if defined(__linux__)
-        pthread_setname_np(pthread_self(), "emu");  // shown by top -H and ps -L
-#endif
+        initEmulatorThread("emu");
         threadMain();
     });
 }

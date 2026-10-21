@@ -2,13 +2,11 @@
 
 #include <chrono>
 
-#if defined(__linux__)
-#include <pthread.h>
-#endif
-
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
+
+#include "threads.h"
 
 namespace hydra {
 
@@ -57,9 +55,7 @@ EffectsRack::EffectsRack(bool threaded) : threaded_(threaded) {
     if (threaded_) {
         ring_.resize(kRingSize);
         worker_ = std::thread([this] {
-#if defined(__linux__)
-            pthread_setname_np(pthread_self(), "fx");  // shown by top -H and ps -L
-#endif
+            initEmulatorThread("fx");
             workerLoop();
         });
     }
