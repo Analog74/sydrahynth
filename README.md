@@ -15,6 +15,18 @@ standalone app in `build/Sydrahynth_artefacts/<config>/`. Install by
 copying `VST3/Sydrahynth.vst3` to `~/.vst3/` and `LV2/Sydrahynth.lv2` to
 `~/.lv2/`.
 
+The default configuration is `RelWithDebInfo` (`-O2` with debug symbols, a
+standalone of over 200 MB). For everyday use, build `Release` (`-O3`, no
+debug symbols: 15 MB, about 7% faster, 6% less CPU at real-time pace) in a
+directory of its own:
+
+    cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-release
+
+The plugin is then in `build-release/Sydrahynth_artefacts/Release/`. The gain
+is modest because most of the time goes to code the JITs generate at run
+time, which the compiler flags do not affect.
+
 ## License
 
 Sydrahynth is free software, licensed under the GNU Affero General Public
