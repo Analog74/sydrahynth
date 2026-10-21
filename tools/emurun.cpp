@@ -671,6 +671,53 @@ int main(int argc, char** argv) {
         next = Clock::now();
     };
     measureUnpaced("no patch");
+    // HYDRA_ARP_PLAY=<seconds>: turns the arpeggiator on (ARP ON), holds middle C
+    // and pulls audio at real-time pace like a host for that long; writes the
+    // take to <out.wav> and lists when underruns happened (wall seconds), for
+    // checking the arpeggio's timing.
+    if (const char* play = std::getenv("HYDRA_ARP_PLAY")) {
+        pull(1.0, false);
+        if (argc > 3) {  // patch HYDRA_ARP_PATCH (default 0) of the bank to A001
+            const std::vector<Patch> patches = loadPatches(argv[3]);
+            const std::size_t index = std::getenv("HYDRA_ARP_PATCH") ? std::strtoul(std::getenv("HYDRA_ARP_PATCH"), nullptr, 10) : 0;
+            for (const auto& message : sysex::patchUpload(patches.at(index).body, 0, 0, true)) {
+                emulator.sendMidi(message.data(), message.size());
+                pull(0.1, false);
+            }
+            std::printf("uploaded '%s' to A001\n", patches[index].name.c_str());
+            pull(0.5, false);
+        }
+        emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 1, 0});
+        pull(0.15, false);
+        emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 0, 0});
+        pull(0.5, false);
+        const std::uint8_t on[] = {0x90, 60, 100};
+        emulator.sendMidi(on, 3);
+        const auto blocks = static_cast<int>(std::atof(play) * Emulator::kSampleRate / kBlock);
+        const auto start = Clock::now();
+        std::uint64_t underruns = emulator.underruns();
+        int late = 0;
+        for (int b = 0; b < blocks; ++b) {
+            next += std::chrono::microseconds(static_cast<long>(1e6 * kBlock / Emulator::kSampleRate));
+            std::this_thread::sleep_until(next);
+            if (Clock::now() - next > std::chrono::milliseconds(2))
+                ++late;  // the test itself woke late
+            const std::size_t got = emulator.readAudio(left.data(), right.data(), kBlock);
+            if (emulator.underruns() != underruns) {
+                underruns = emulator.underruns();
+                std::printf("underrun at %.3f s: %zu of %zu frames\n", std::chrono::duration<double>(Clock::now() - start).count(), got, kBlock);
+            }
+            for (std::size_t i = 0; i < kBlock; ++i) {
+                out.push_back(left[i]);
+                out.push_back(right[i]);
+            }
+        }
+        std::printf("arp play: %d blocks, %d woken late, slowest run chunk %llu us\n", blocks, late,
+                    static_cast<unsigned long long>(emulator.slowestChunkMicros()));
+        writeFloatWav(argv[2], out);
+        emulator.stop();
+        return 0;
+    }
     // HYDRA_LOAD_TEST=i,j,...: the cost of patches i, j, ... of the bank (each
     // uploaded to A001) silent, with one note and with eight, as core time per
     // emulated second of the DSP cores, the main CPU and the panel MCU, and
