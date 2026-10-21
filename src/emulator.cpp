@@ -82,7 +82,7 @@ void Emulator::start(const Config& config) {
     try {
         firmware_ = std::make_unique<FirmwarePack>(FirmwarePack::load(config.firmwarePath));
         Machine::Config machineConfig;
-        machineConfig.dspThread = true;
+        machineConfig.dspThread = std::getenv("HYDRA_DSP_SYNC") == nullptr;  // diagnostic: DSP side in step on this thread
         machineConfig.systemSettings = config.systemSettings;
         machineConfig.flash = config.flash;
         machine_ = std::make_unique<Machine>(*firmware_, machineConfig);

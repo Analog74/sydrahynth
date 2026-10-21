@@ -673,7 +673,8 @@ int main(int argc, char** argv) {
         next = Clock::now();
     };
     measureUnpaced("no patch");
-    // HYDRA_ARP_PLAY=<seconds>: turns the arpeggiator on (ARP ON), holds middle C
+    // HYDRA_ARP_PLAY=<seconds>: turns the arpeggiator on (ARP ON; HYDRA_ARP_INIT=n
+    // presses INIT n times first), holds middle C
     // and pulls audio at real-time pace like a host for that long; writes the
     // take to <out.wav> and lists when underruns happened (wall seconds), for
     // checking the arpeggio's timing; reports the process's CPU use meanwhile.
@@ -689,10 +690,42 @@ int main(int argc, char** argv) {
             std::printf("uploaded '%s' to A001\n", patches[index].name.c_str());
             pull(0.5, false);
         }
-        emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 1, 0});
-        pull(0.15, false);
-        emulator.panelInput({Emulator::PanelInput::Kind::Button, 26, 0, 0});
-        pull(0.5, false);
+        const auto press = [&](int button) {
+            emulator.panelInput({Emulator::PanelInput::Kind::Button, button, 1, 0});
+            pull(0.15, false);
+            emulator.panelInput({Emulator::PanelInput::Kind::Button, button, 0, 0});
+            pull(0.5, false);
+        };
+        const auto screens = [&](const char* name) {
+            FrontPanel::Lights lights;
+            std::uint64_t generation = 0;
+            emulator.readPanel(lights, generation);
+            if (std::FILE* f = std::fopen(std::format("{}.{}.pgm", argv[2], name).c_str(), "wb")) {
+                std::fprintf(f, "P5\n128 %zu\n255\n", lights.displays.size() * 64);
+                for (const auto& display : lights.displays)
+                    std::fwrite(display.data(), 1, display.size(), f);
+                std::fclose(f);
+            }
+        };
+        if (const char* init = std::getenv("HYDRA_ARP_INIT")) {  // INIT, pressed this many times
+            for (int i = 0; i < std::atoi(init); ++i) {
+                press(44);
+                screens(std::format("init{}", i).c_str());
+            }
+        }
+        const auto arpLight = [&] {
+            FrontPanel::Lights lights;
+            std::uint64_t generation = 0;
+            emulator.readPanel(lights, generation);
+            return lights.buttons[30];
+        };
+        pull(1.0, false);
+        // ARP ON; pressed again if its light stays dark (right after INIT the
+        // first press can go to the confirmation dialog)
+        for (int attempt = 0; attempt < 3 && arpLight() < 0.5f; ++attempt)
+            press(26);
+        screens("arp");
+        std::printf("ARP ON light %.2f\n", arpLight());
         const std::uint8_t on[] = {0x90, 60, 100};
         emulator.sendMidi(on, 3);
         const auto blocks = static_cast<int>(std::atof(play) * Emulator::kSampleRate / kBlock);
@@ -706,11 +739,19 @@ int main(int argc, char** argv) {
         emulator.resetChunkStats();
         std::uint64_t underruns = emulator.underruns();
         int late = 0;
+        // HYDRA_ARP_UNPACED: takes the frames as the emulator makes them, at any
+        // pace, so the take shows the emulation's timing without underruns.
+        const bool unpaced = std::getenv("HYDRA_ARP_UNPACED") != nullptr;
         for (int b = 0; b < blocks; ++b) {
-            next += std::chrono::microseconds(static_cast<long>(1e6 * kBlock / Emulator::kSampleRate));
-            std::this_thread::sleep_until(next);
-            if (Clock::now() - next > std::chrono::milliseconds(2))
-                ++late;  // the test itself woke late
+            if (unpaced) {
+                while (emulator.bufferedFrames() < kBlock)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } else {
+                next += std::chrono::microseconds(static_cast<long>(1e6 * kBlock / Emulator::kSampleRate));
+                std::this_thread::sleep_until(next);
+                if (Clock::now() - next > std::chrono::milliseconds(2))
+                    ++late;  // the test itself woke late
+            }
             const std::size_t got = emulator.readAudio(left.data(), right.data(), kBlock);
             if (emulator.underruns() != underruns) {
                 underruns = emulator.underruns();
