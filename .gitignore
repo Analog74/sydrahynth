@@ -1,4 +1,4 @@
-build/
+build*/
 external/
 # ASM firmware and manuals: user-supplied, never commit
 *.dat
