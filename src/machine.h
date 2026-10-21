@@ -181,9 +181,8 @@ private:
     void processEffects(std::uint32_t* ports);
     // Brings the DSP side up to `sample` (asynchronously with Config::dspThread).
     void requestDsp(std::uint64_t sample);
-    // Waits while the DSP side is more than kMaxDspLagSamples behind the CPU.
-    void boundDspLag();
-    static constexpr std::uint64_t kMaxDspLagSamples = 88;  // 2 ms
+    // Raises the DSP interrupts due by `sample` (with Config::dspThread).
+    void deliverDspInterrupts(std::uint64_t sample);
     // Waits until the DSP side has reached the last requested sample.
     void waitDsp();
     void waitDspReached(std::uint64_t sample);
@@ -229,7 +228,8 @@ private:
     std::thread dspThread_;
     std::atomic<std::uint64_t> dspRequested_{0}, dspReached_{0};
     std::atomic<bool> dspQuit_{false};
-    std::atomic<std::uint32_t> dspIrq15_{0}, dspIrq14_{0};  // raised by the DSP side, delivered by the CPU side
+    std::atomic<std::uint32_t> dspIrq15_{0}, dspIrq14_{0};  // raised by the DSP side, delivered by the CPU side (in step)
+    std::uint64_t nextDspInterrupt_ = 32;  // sample of the next DSP interrupt (with Config::dspThread)
     std::unique_ptr<CpuCore> cpu_;
     bool idle_ = false;  // in WFI until an interrupt is pending
     std::uint64_t adcConversionTicks_ = 2000;

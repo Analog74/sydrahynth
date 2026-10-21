@@ -540,15 +540,23 @@ results to the DSP; addresses are A5 code/DRAM addresses.
   running cores without waiting, as on the hardware. Effects then run on their own thread too, with I2C
   accesses queued by sample. Parameter writes may land a sample later or
   earlier than single-threaded, so runs are not bit-identical.
-- The DSP side's lag behind the CPU is bounded: after each run chunk the CPU
-  waits while the DSP side is more than 2 ms (88 samples) behind
-  (`Machine::boundDspLag`). Without the bound a DSP side slower than the CPU
-  (one DSP thread, few or busy cores, and the unpaced boot) fell behind
-  without limit, and since MIDI arrives in CPU time a note was heard that
-  much later: 5 s with one DSP thread (found by a Windows port's headless test,
-  where the note came out silent). With the bound the lag stays at 2-3 ms and
-  four DSP threads cost nothing (3.0 x real time as before); waiting at every
-  chunk instead (`HYDRA_DSP_SETTLE`) would serialise CPU and DSP side.
+- The DSP block's interrupts (line 15 every 32 samples, line 14 every 64) are
+  raised by the CPU side at a fixed emulated time, 64 samples after they are
+  due (`Machine::deliverDspInterrupts`): each slice ends at the next one, and
+  there the CPU waits until the DSP side has run up to it. The firmware counts them (its control rate; the arpeggiator
+  steps every 86 at 120 BPM). Raising what the DSP side had reached meanwhile
+  instead came late by a varying amount and, when it caught up, several at once,
+  which the interrupt controller merges: the arpeggio wavered and slowed with
+  the host's speed (126-129 instead of 124.8 ms per step on a Core Ultra
+  laptop, steps up to 13 ms off). The wait also bounds the DSP side's lag to
+  one block; without a bound a DSP side slower than the CPU (one DSP thread,
+  few or busy cores, the unpaced boot) fell behind without limit, and since
+  MIDI arrives in CPU time a note was heard that much later (5 s with one DSP
+  thread, found by a Windows port's headless test). Raising them without the
+  delay made the CPU wait at each for the DSP side's last samples (2.7 instead
+  of 3.0 x real time, 1.2 instead of 1.4 x on two cores). The steps still vary
+  by one control period (1.45 ms) either way, in step with the DSP side too
+  (`HYDRA_DSP_SYNC`).
 - `DspBlock::setThreads` takes the workers' starting generation before it
   launches them: a worker that started late used to take the first sample as
   already seen, and `advanceToSample` waited for it forever (on one core it

@@ -301,11 +301,12 @@ Machine::Machine(const FirmwarePack& firmware, const Config& config) {
             onSample(ports);
     };
     dsp_->onBlock = [this](std::uint64_t sample) {
+        if (dspAsync_)
+            return;  // run() raises them at their time (deliverDspInterrupts)
         dspIrq15_.fetch_add(1, std::memory_order_relaxed);
         if ((sample & 0x3F) == 0)
             dspIrq14_.fetch_add(1, std::memory_order_relaxed);
-        if (!dspAsync_)
-            raiseDspInterrupts();
+        raiseDspInterrupts();
     };
     // The DSP block's RAM and mailboxes are shared with the running cores, as on the
     // hardware: no waiting (word accesses race like the real buses do).
@@ -438,6 +439,15 @@ namespace {
 // panel catch-ups; a polled ADC ends a slice early (see onBusyPoll).
 constexpr std::uint64_t kMaxSlice = 40000;
 constexpr std::uint64_t kTimerTicksPerSample = 1536;  // 67.7376 MHz / 44.1 kHz
+constexpr std::uint64_t kDspBlock = 32;  // samples between DSP interrupts (DspBlock::onBlock)
+// How long the CPU and DSP sides spin for each other before they sleep.
+// The CPU side raises each DSP interrupt this many samples after the DSP side
+// has run up to it, always the same: the DSP side may then lag by that much
+// without holding up the CPU (with no delay the CPU waited at every interrupt
+// for the last samples: 2.7 instead of 3.0 x real time, 1.2 instead of 1.4 x
+// on two cores), and the firmware sees its control rate shifted, not varied.
+constexpr std::uint64_t kDspInterruptDelay = 64;
+constexpr std::chrono::nanoseconds kDspSpin = std::chrono::microseconds(50);
 
 // 67.7376 MHz / 400 MHz = 2646 / 15625; 64-bit arithmetic lasts 100 days of
 // emulated time and divides by constants (a 128-bit division cost ~1% of the
@@ -498,46 +508,45 @@ void Machine::waitDsp() {
     waitDspReached(target);
 }
 
-void Machine::boundDspLag() {
-    // The DSP side runs on its own thread, behind the CPU. Without a bound a
-    // DSP side slower than the CPU (fewer DSP threads, a busy or slower machine,
-    // the unpaced boot) falls behind without limit, and MIDI, which arrives in
-    // CPU time, is heard that much later (5 s were measured with one DSP
-    // thread). Waiting only beyond kMaxDspLagSamples keeps the two in parallel.
-    if (!dspAsync_)
-        return;
-    const std::uint64_t target = dspRequested_.load(std::memory_order_relaxed);
-    if (target <= kMaxDspLagSamples || dspReached_.load(std::memory_order_acquire) + kMaxDspLagSamples >= target)
+void Machine::deliverDspInterrupts(std::uint64_t sample) {
+    // The DSP block interrupts the CPU every kDspBlock samples (line 15) and
+    // every second time also on line 14, once it has run them. With the DSP
+    // side on its own thread the CPU raises them kDspInterruptDelay samples
+    // later, at that emulated time exactly, one at a time, waiting there until
+    // the DSP side has run up to them. Raising what the DSP side had reached
+    // meanwhile instead came late by a varying amount and, when the DSP side
+    // caught up, several at once, which the interrupt controller merges into
+    // one. The firmware counts them (its control rate; the arpeggiator steps
+    // every 86), so the arpeggio wavered and slowed with the host's speed: on
+    // a laptop 129 instead of 124.8 ms per step, with steps up to 12 ms off.
+    // The wait also bounds the DSP side's lag behind the CPU.
+    if (nextDspInterrupt_ + kDspInterruptDelay > sample)
         return;
     const ScopedTime t(profile_.enabled, profile_.dspWait);
-    waitDspReached(target - kMaxDspLagSamples);
+    while (nextDspInterrupt_ + kDspInterruptDelay <= sample) {
+        waitDspReached(nextDspInterrupt_);
+        intc_->raise(15);
+        if ((nextDspInterrupt_ & 0x3F) == 0)
+            intc_->raise(14);
+        nextDspInterrupt_ += kDspBlock;
+    }
 }
 
 void Machine::waitDspReached(std::uint64_t sample) {
-    // Spins briefly, then sleeps until the DSP thread reports progress: the CPU
-    // side is usually the faster one and waits here often, and yielding in a
-    // loop kept a core busy for all that time.
-    for (int spins = 0;; ++spins) {
-        const std::uint64_t reached = dspReached_.load(std::memory_order_acquire);
-        if (reached >= sample)
-            return;
-        if (spins > 4096)
-            dspReached_.wait(reached, std::memory_order_acquire);
-    }
+    // The CPU waits here at every DSP interrupt for the last few samples, so it
+    // spins first; yielding in a loop instead kept a core busy all the time.
+    spinThenWait(dspReached_, [&](std::uint64_t reached) { return reached >= sample; }, kDspSpin);
 }
 
 void Machine::dspThreadLoop() {
     std::uint64_t reached = 0;
-    for (int spins = 0; !dspQuit_.load(std::memory_order_relaxed);) {
-        const std::uint64_t target = dspRequested_.load(std::memory_order_acquire);
-        if (target <= reached) {
-            // Spin briefly (requests come every few microseconds while running),
-            // then sleep until the next request, e.g. while the emulator pauses.
-            if (++spins > 4096)
-                dspRequested_.wait(target, std::memory_order_acquire);
-            continue;
-        }
-        spins = 0;
+    for (;;) {
+        // Requests come every few microseconds while the emulator runs; sleep
+        // when it pauses.
+        const std::uint64_t target = spinThenWait(
+            dspRequested_, [&](std::uint64_t requested) { return requested > reached; }, kDspSpin);
+        if (dspQuit_.load(std::memory_order_relaxed))
+            return;
         advanceDsp(target);
         reached = target;
         dspReached_.store(reached, std::memory_order_release);
@@ -562,8 +571,10 @@ Machine::Status Machine::run(std::uint64_t ticks, bool settle) {
         const std::uint64_t now = cpu_->ticksExecuted();
         const std::uint64_t timerNow = timerTicksAt(now);
         timer_->advanceTo(timerNow);
-        requestDsp(timerNow / kTimerTicksPerSample);
-        raiseDspInterrupts();
+        const std::uint64_t sample = timerNow / kTimerTicksPerSample;
+        requestDsp(sample);
+        if (dspAsync_)
+            deliverDspInterrupts(sample);
         if (now >= nextFrontPanelTick_) {
             frontPanel_->advance(now / (kCpuHz / 1'000'000));
             nextFrontPanelTick_ = now + kCpuHz / 4000;  // every 250 us
@@ -581,6 +592,8 @@ Machine::Status Machine::run(std::uint64_t ticks, bool settle) {
         std::uint64_t slice = std::min(end - now, kMaxSlice);
         if (const auto next = timer_->ticksToNextEvent())
             slice = std::min(slice, cpuTicksFor(*next) + 1);
+        if (dspAsync_)  // stop at the next DSP interrupt
+            slice = std::min(slice, cpuTicksFor((nextDspInterrupt_ + kDspInterruptDelay) * kTimerTicksPerSample - timerNow) + 1);
         if (adcDoneAt_)
             slice = std::min(slice, adcDoneAt_ - now);
         slice = std::max<std::uint64_t>(slice, 1);
@@ -618,12 +631,8 @@ Machine::Status Machine::run(std::uint64_t ticks, bool settle) {
         if (stop == CpuCore::Stop::WaitForInterrupt || std::exchange(adcWaiting_, false))
             idle_ = true;
     }
-    if (settle) {
+    if (settle)
         waitDsp();
-        raiseDspInterrupts();
-    } else {
-        boundDspLag();
-    }
     return Status::Running;
 }
 

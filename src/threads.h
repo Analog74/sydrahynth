@@ -1,5 +1,12 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
+
 namespace hydra {
 
 // Sets up the calling thread as one of the emulator's: names it (shown by
@@ -11,5 +18,26 @@ namespace hydra {
 // output had underruns, without the two LP E-cores none. Cores of equal
 // capacity, the usual case, are all kept. HYDRA_ALL_CORES=1 keeps every core.
 void initEmulatorThread(const char* name);
+
+// Waits until `ready(value)` holds for the value of `atomic` and returns that
+// value: spins for up to `spin` (the other thread is usually that quick, and
+// waking a sleeping thread takes far longer, especially on power-saving cores),
+// then sleeps until the value changes (the writer must notify).
+template <typename T, typename Ready>
+T spinThenWait(const std::atomic<T>& atomic, Ready ready, std::chrono::nanoseconds spin) {
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point until = Clock::now() + spin;
+    for (int spins = 1;; ++spins) {
+        const T value = atomic.load(std::memory_order_acquire);
+        if (ready(value))
+            return value;
+        if (spins % 64 == 0 && Clock::now() > until)
+            atomic.wait(value, std::memory_order_acquire);
+#if defined(__x86_64__) || defined(__i386__)
+        else
+            _mm_pause();
+#endif
+    }
+}
 
 }  // namespace hydra
